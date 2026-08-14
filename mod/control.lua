@@ -378,7 +378,12 @@ script.on_event(defines.events.on_console_chat, function(event)
   -- Queue it so it reaches the bridge even if a request is currently in flight.
   mem.pending_user_message = directive
 
-  AIBrain.set_directive(directive, 1800)
+  -- 18000 ticks = 5 minutes. The old 1800 (30s) was shorter than a single turn against a
+  -- local model — the directive expired before the next request was even built, so the
+  -- player was acknowledged and then watched the agent go straight back to its standing
+  -- priorities. A directive should outlive several turns; the player replaces it by
+  -- speaking again.
+  AIBrain.set_directive(directive, 18000)
 
   -- Immediate, model-independent acknowledgement so the player always gets
   -- feedback the instant they speak — does not wait on the (possibly slow) LLM.
