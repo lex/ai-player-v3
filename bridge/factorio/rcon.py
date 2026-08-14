@@ -126,7 +126,12 @@ class RCONGateway:
         Returns True if the command was sent (not necessarily processed).
         """
         try:
-            actions_json = json.dumps(actions, separators=(",", ":"))
+            # ensure_ascii=False on purpose. The default escapes every non-ASCII character
+            # to \uXXXX, and the mod parses JSON with a hand-rolled Lua matcher that has no
+            # \u handling — so an em dash arrived in game as the literal text "u2014".
+            # Factorio's RCON channel is UTF-8, so sending the character itself is correct
+            # and also shorter.
+            actions_json = json.dumps(actions, separators=(",", ":"), ensure_ascii=False)
         except (TypeError, ValueError) as e:
             log.error("Failed to serialise actions: %s", e)
             return False
