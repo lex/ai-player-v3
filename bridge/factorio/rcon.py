@@ -174,19 +174,21 @@ class RCONGateway:
         and on_load (save loaded). Call this when the bridge restarts while Factorio
         keeps running — old request IDs are stale and the mod would block indefinitely
         waiting for responses that will never arrive.
+
+        Sent as the mod's own /ai-clear command, NOT as /silent-command touching
+        storage.ai_player: a console script runs in the *scenario's* Lua context, where
+        `storage` is the running scenario's table and storage.ai_player is always nil.
+        Poking it from there is a silent no-op, so the mod kept its in-flight request and
+        refused to ask anything new until that request hit its own timeout — the bridge
+        looked alive but the AI stood still for minutes after every bridge restart.
+        Commands registered by the mod do run in the mod's context, so /ai-clear works.
         """
-        lua = (
-            "if storage.ai_player then "
-            "local n=0 "
-            "for _ in pairs(storage.ai_player.pending_requests) do n=n+1 end "
-            "storage.ai_player.pending_requests={} "
-            "game.print('[AI Bridge] Cleared '..n..' pending request(s)') "
-            "else game.print('[AI Bridge] No AI state to clear') end"
-        )
-        result = self.query_lua(lua)
+        result = self._send("/ai-clear")
         if result is not None:
-            log.info("clear_pending_requests: %s", result.strip())
+            log.info("clear_pending_requests: sent /ai-clear")
             return True
+        log.warning("clear_pending_requests: /ai-clear failed — the mod may still be "
+                    "holding a stale request until it times out")
         return False
 
     def set_request_timeout(self, seconds: float) -> bool:
@@ -195,6 +197,15 @@ class RCONGateway:
         pending request. Derived from the bridge SDK timeout (AI_TIMEOUT + margin)
         so the mod never expires a request before the model's allotted reply time.
         Single source of truth = AI_TIMEOUT in the bridge.
+
+        KNOWN LIMITATION: this does not currently reach the mod. Like clear_pending_requests
+        before it, the Lua below runs in the scenario's context, where storage.ai_player is
+        nil, so the assignment is a silent no-op and the mod keeps its own
+        DEFAULT_REQUEST_TIMEOUT_TICKS (300s) regardless of AI_TIMEOUT. Harmless while turns
+        finish well inside 300s, but with AI_TIMEOUT above that the mod can expire a request
+        the bridge is still waiting on, and the late reply is rejected as an unknown id.
+        Fixing it properly needs a mod-side entry point (a remote interface function or a
+        console command), since only mod-registered code can write the mod's storage.
         """
         ticks = int(seconds * 60)
         lua = (
