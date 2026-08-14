@@ -97,7 +97,9 @@ def main() -> None:
 
     # Phase 4: create watcher and agent
     watcher = FileWatcher(cfg.output_dir, cfg.poll_interval, request_timeout=derived_timeout)
-    agent = Agent()
+    # The agent needs the RCON gateway for tool-calling turns, where it runs skills
+    # through the mod directly and reads each result before deciding again.
+    agent = Agent(rcon=rcon)
 
     # Phase 3: clear stale pending requests left over from a previous session.
     # Order matters: clear the mod's queue first, then purge the matching
@@ -114,6 +116,12 @@ def main() -> None:
         # asymmetric: a skill only the mod has is unreachable, while one only the bridge
         # advertises gets offered to the model and fails every time it is picked. Ask the
         # mod what it really implements and say so at startup, where it will be noticed.
+        from .tools import undocumented_skills
+        undocumented = undocumented_skills()
+        if undocumented:
+            log.warning("Skills with no tool definition: %s — the model would see only a "
+                        "bare name if the tool loop is on", ", ".join(undocumented))
+
         mod_skills = rcon.list_skills()
         if mod_skills:
             from .factorio.api import SKILLS

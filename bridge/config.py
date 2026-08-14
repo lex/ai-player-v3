@@ -110,6 +110,11 @@ class BridgeConfig:
     # this is the API-level control, and on a model that advertises it, it is the
     # single biggest latency lever. Empty means "do not send the parameter".
     reasoning_effort: str = ""
+    # Drive turns as a tool-calling conversation (call a skill, see the result, decide
+    # again) instead of one blind action list. Off by default: it costs several model
+    # round trips per turn while the game keeps running, so it wants measuring before it
+    # becomes the default.
+    tool_loop: bool = False
     # Extra request-body fields as a JSON object, for server-specific switches (e.g.
     # {"think": false} to turn thinking off on a server that does it by default).
     extra_body: dict = field(default_factory=dict)
@@ -214,6 +219,7 @@ class ConfigLoader:
                 pass
         cfg.system_prefix = self._e("AI_SYSTEM_PREFIX", cfg.system_prefix)
         cfg.reasoning_effort = self._e("AI_REASONING_EFFORT", cfg.reasoning_effort)
+        cfg.tool_loop = self._e("AI_TOOL_LOOP", "").strip().lower() in ("1", "true", "yes", "on")
         extra_body = self._e("AI_EXTRA_BODY")
         if extra_body:
             try:

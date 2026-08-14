@@ -14,7 +14,8 @@ from .config import BridgeConfig
 from .factorio.api import parse_response
 from .factorio.watcher import PendingRequest
 from .metrics import STATUS_OK, STATUS_PARSE_ERROR, STATUS_TIMEOUT, record_exchange
-from .goals import GoalTracker
+from .agent_loop import run_tool_turn
+from .goals import GoalTracker, TurnHistory
 from .prompt import build_messages, next_objective
 from .providers import get_provider
 from .transcript import log_exchange
@@ -73,9 +74,12 @@ def _fallback(reason: str) -> list[dict]:
 
 
 class Agent:
-    def __init__(self):
-        # Long-lived with the bridge process, so goals persist across turns.
+    def __init__(self, rcon=None):
+        # Long-lived with the bridge process, so goals and history persist across turns.
         self.goals = GoalTracker()
+        self.history = TurnHistory()
+        # Needed only by the tool loop, which executes skills through the mod directly.
+        self.rcon = rcon
 
     def decide(self, req: PendingRequest, config: BridgeConfig) -> list[dict]:
         provider_cfg = config.to_provider_config()
@@ -105,9 +109,33 @@ class Agent:
             if entry:
                 log.info("Request %s: answered from the objective ladder, no model call (%s)",
                          req.req_id, entry.get("skill"))
+                self.history.record(f"ladder chose {entry.get('skill')}")
                 return [{"action": "chat", "message": chat_line}, entry]
 
-        messages = build_messages(payload, config.system_prefix, self.goals.note())
+        notes = [n for n in (self.goals.note(), self.history.as_message()) if n]
+        messages = build_messages(payload, config.system_prefix,
+                                  "\n\n".join(notes) if notes else None)
+
+        # Tool-calling turn: call a skill, see its result, decide again — all before the
+        # turn ends. Falls through to the single-shot text path if it cannot run.
+        if config.tool_loop and self.rcon is not None:
+            log.info("Request %s: tool-calling turn (%s)", req.req_id, why_model)
+            result = run_tool_turn(messages, provider_cfg, self.rcon)
+            if result is not None and result.did_anything:
+                self.history.record_tool_turn(result.executed)
+                log.info("Request %s: %d tool call(s), stopped because %s",
+                         req.req_id, len(result.executed), result.stopped_because)
+                # The skills have already run, so the mod just needs something to close the
+                # request with: say what happened rather than acting twice.
+                summary = "; ".join(
+                    f"{e['skill']}: {'ok' if e['ok'] else 'failed'}" for e in result.executed)
+                say = result.narration or ("Did: " + summary)
+                return [
+                    {"action": "chat", "message": say[:240]},
+                    {"action": "summary", "text": summary[:400]},
+                ]
+            log.warning("Request %s: tool loop produced nothing — using the text path",
+                        req.req_id)
 
         log.info("Routing request %s via %s (model=%s)",
                  req.req_id, provider_cfg.provider, provider_cfg.model)

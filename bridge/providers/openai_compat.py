@@ -80,3 +80,61 @@ def complete(messages: list[dict], config: ProviderConfig) -> str | None:
         log.error("API error %s: %s", e.status_code, e.message)
 
     return None
+
+def complete_with_tools(messages: list[dict], config: ProviderConfig,
+                        tools: list[dict]) -> dict | None:
+    """
+    One tool-calling round trip.
+
+    Returns {"content": str|None, "tool_calls": [{"id", "name", "arguments"}]} or None on
+    failure. Unlike complete(), nothing here has to be parsed out of prose: the server
+    validates each call against the schema, so a malformed skill invocation cannot reach us.
+    """
+    try:
+        from openai import OpenAI, APIError, APITimeoutError, APIConnectionError
+    except ImportError:
+        log.error("openai package not installed — run: pip install openai")
+        return None
+
+    client = OpenAI(base_url=config.url, api_key=config.api_key,
+                    timeout=config.timeout, max_retries=0)
+
+    extra_body: dict | None = dict(config.extra_body) if config.extra_body else None
+    if config.reasoning_effort:
+        extra_body = extra_body or {}
+        extra_body["reasoning_effort"] = config.reasoning_effort
+
+    try:
+        response = client.chat.completions.create(
+            model=config.model,
+            messages=messages,
+            max_tokens=config.max_tokens,
+            temperature=config.temperature,
+            tools=tools,
+            extra_body=extra_body,
+        )
+        if not response.choices:
+            log.error("no choices returned (model=%s)", config.model)
+            return None
+
+        message = response.choices[0].message
+        calls = []
+        for call in (getattr(message, "tool_calls", None) or []):
+            fn = getattr(call, "function", None)
+            if not fn:
+                continue
+            calls.append({
+                "id": getattr(call, "id", "") or "",
+                "name": fn.name,
+                "arguments": fn.arguments or "{}",
+            })
+        return {"content": message.content, "tool_calls": calls}
+
+    except APITimeoutError:
+        log.error("Request timed out after %.0fs (model=%s)", config.timeout, config.model)
+    except APIConnectionError as e:
+        log.error("Cannot reach %s: %s", config.url, e)
+    except APIError as e:
+        log.error("API error %s: %s", e.status_code, e.message)
+
+    return None

@@ -62,3 +62,37 @@ class GoalTracker:
             f'Continuing "{self._goal}" (turn {self._attempts} on this goal). Finish it rather '
             "than starting something else, unless your last results say it cannot be done."
         )
+
+class TurnHistory:
+    """
+    A short rolling window of recent turns.
+
+    Full conversation history would grow without bound over a long game and be re-sent every
+    turn; a handful of recent turns gives the model continuity — what it just tried and how
+    that went — at a fixed cost. Deliberately in memory: this describes the current run, and
+    a restart should forget it.
+    """
+
+    def __init__(self, keep: int = 6):
+        self._keep = keep
+        self._turns: list[str] = []
+
+    def record(self, summary: str) -> None:
+        if not summary:
+            return
+        self._turns.append(summary)
+        del self._turns[:-self._keep]
+
+    def record_tool_turn(self, executed: list[dict]) -> None:
+        for e in executed:
+            self.record("{} {} -> {}".format(
+                "OK  " if e.get("ok") else "FAIL",
+                e.get("skill", "?"),
+                (e.get("detail") or "")[:110],
+            ))
+
+    def as_message(self) -> str | None:
+        if not self._turns:
+            return None
+        return ("What you have done recently, oldest first (do not repeat what already "
+                "failed):\n" + "\n".join(f"  {t}" for t in self._turns))
