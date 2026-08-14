@@ -673,11 +673,13 @@ local function skill_craft(character, p)
   local recipe = prototypes.recipe[recipe_name]
   if not recipe then return false, "craft: no such recipe '" .. recipe_name .. "'" end
 
-  local craftable = character.force.get_craftable_count and
-                    character.force.get_craftable_count(recipe_name) or nil
-  if craftable == nil then
-    -- Older/other API shape: fall back to asking the character directly.
-    craftable = character.get_craftable_count(recipe_name)
+  -- get_craftable_count lives on LuaControl (the character), NOT on LuaForce. Indexing a
+  -- key a Lua object does not have raises an error rather than returning nil, so an
+  -- `x.foo and x.foo()` guard does not protect anything here — ask the character directly.
+  local got, craftable = pcall(function() return character.get_craftable_count(recipe_name) end)
+  if not got then
+    return false, "craft: cannot determine craftability of " .. recipe_name ..
+                  " (" .. tostring(craftable) .. ")"
   end
   if craftable == 0 then
     local inv = inv_of(character)
@@ -719,6 +721,7 @@ local function skill_clear_area(character, p)
   local surface = character.surface
   local inv = inv_of(character)
   local cleared = 0
+  local mined_units = 0
   -- include_ore defaults ON: the caller asking to clear ground on an ore map means
   -- the ore too, and on a normal map there is simply no ore to find.
   local include_ore = p.include_ore ~= false
@@ -747,21 +750,44 @@ local function skill_clear_area(character, p)
     if not target then break end
     local sp = surface.find_non_colliding_position("character", target.position, 3, 0.5)
     if sp then character.teleport(sp) end
-    local before = inv.get_item_count()
-    if not character.mine_entity(target, true) then break end
-    if inv.get_item_count() == before then
-      -- Mined but gained nothing: inventory is full, so stop rather than spin.
-      cleared = cleared + 1
+
+    -- Do NOT trust mine_entity's return value. On a resource it reports false whenever the
+    -- tile still holds ore after the swing — which is almost always, since one tile carries
+    -- hundreds — even though the swing succeeded and the ore is in your inventory. Judge by
+    -- what the inventory gained, the same way gather does.
+    -- An ore tile also needs many swings to disappear, and a tile that is merely reduced is
+    -- still unbuildable, so keep going until the entity is actually gone.
+    local finished = false
+    for _ = 1, 400 do
+      if not target.valid then finished = true break end
+      local before = inv.get_item_count()
+      character.mine_entity(target, true)
+      if inv.get_item_count() == before then break end   -- inventory full, or unmineable
+      mined_units = mined_units + 1
+    end
+    if not finished and target.valid then
+      -- Could not finish this one; stop rather than spin on it forever.
       break
     end
     cleared = cleared + 1
   end
 
   if cleared == 0 then
+    local left = #surface.find_entities_filtered{
+      position = character.position, radius = radius,
+      type = include_ore and {"tree", "simple-entity", "resource"} or {"tree", "simple-entity"},
+      limit = 1,
+    }
+    if left > 0 then
+      return false, string.format(
+        "clear_area: found things to clear within %d tiles but could not mine them — " ..
+        "inventory is probably full; deposit into a chest and retry", radius)
+    end
     return true, string.format("clear_area: nothing to clear within %d tiles", radius)
   end
-  return true, string.format("cleared %d obstacle(s)%s within %d tiles — there should be "
-    .. "buildable ground here now", cleared, include_ore and " (including ore)" or "", radius)
+  return true, string.format(
+    "cleared %d obstacle(s)%s within %d tiles (%d items mined) — there should be buildable "
+    .. "ground here now", cleared, include_ore and " including ore" or "", radius, mined_units)
 end
 
 -- -------------------------------------------------------------------------
