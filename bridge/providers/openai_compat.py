@@ -38,12 +38,18 @@ def complete(messages: list[dict], config: ProviderConfig) -> str | None:
         max_retries=0,
     )
 
+    # Sent through extra_body rather than as a named argument: the SDK only accepts
+    # reasoning_effort for models it knows, while any OpenAI-compatible server that
+    # supports it reads it straight off the request body.
+    extra_body = {"reasoning_effort": config.reasoning_effort} if config.reasoning_effort else None
+
     try:
         response = client.chat.completions.create(
             model=config.model,
             messages=messages,
             max_tokens=config.max_tokens,
             temperature=config.temperature,
+            extra_body=extra_body,
         )
         if not response.choices:
             log.error(

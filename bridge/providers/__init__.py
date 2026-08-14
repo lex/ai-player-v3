@@ -23,6 +23,13 @@ class ProviderConfig:
     timeout: float = 120.0
     max_tokens: int = 8192
     temperature: float = 0.7
+    # Reasoning budget for models that think before answering. Sent only when set,
+    # so servers that do not know the parameter are unaffected. On a reasoning model
+    # the thinking tokens dominate turn latency: they are generated at the same rate
+    # as the answer but never reach the game, so a turn can spend most of its time
+    # producing text the mod throws away. Check the server's /v1/models
+    # supported_parameters for "reasoning_effort" before setting this.
+    reasoning_effort: str = ""
 
 
 def get_provider(config: ProviderConfig):

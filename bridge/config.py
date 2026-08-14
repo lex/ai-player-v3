@@ -105,6 +105,11 @@ class BridgeConfig:
     # directives without editing code, e.g. "detailed thinking off" disables
     # reasoning on Nemotron models (big latency win). Empty by default.
     system_prefix: str = ""
+    # Reasoning budget, for servers that accept it (see ProviderConfig.reasoning_effort).
+    # A prompt-side prefix like system_prefix only works on models that gate on it;
+    # this is the API-level control, and on a model that advertises it, it is the
+    # single biggest latency lever. Empty means "do not send the parameter".
+    reasoning_effort: str = ""
 
     # RCON
     rcon: RCONConfig = field(default_factory=RCONConfig)
@@ -141,6 +146,7 @@ class BridgeConfig:
             timeout=self.timeout,
             max_tokens=self.max_tokens,
             temperature=self.temperature,
+            reasoning_effort=self.reasoning_effort,
         )
 
 
@@ -203,6 +209,7 @@ class ConfigLoader:
             except ValueError:
                 pass
         cfg.system_prefix = self._e("AI_SYSTEM_PREFIX", cfg.system_prefix)
+        cfg.reasoning_effort = self._e("AI_REASONING_EFFORT", cfg.reasoning_effort)
         cfg.rcon.host     = self._e("FACTORIO_RCON_HOST", cfg.rcon.host)
         port = self._e("FACTORIO_RCON_PORT")
         if port:
