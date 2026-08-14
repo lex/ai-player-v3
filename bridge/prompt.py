@@ -153,6 +153,23 @@ def build_messages(payload: dict, system_prefix: str = "") -> list[dict]:
             f'[{{"skill":"{forced}", ...}}] with appropriate params taken from the directive '
             'above — and nothing else (you may prepend one chat action if replying to the player).'
         )
+    elif mem.get("user_directive"):
+        # A directive whose first word is NOT a registry skill sets no force_skill, so
+        # until now it was only a line buried mid-prompt ("Player directive (keep
+        # following)") competing with the standing RESEARCH and POWER rules in the system
+        # prompt — and losing. Observed directly: "ai mine iron ore and smelt it, forget
+        # power and science for now" was acknowledged in game, then the very next turn
+        # placed an offshore pump and crafted red science.
+        # Restated last, where small models actually weigh it, and given explicit
+        # precedence over the standing rules. Still soft (no fixed skill), because the
+        # model has to translate free text into whichever skills fit.
+        parts.append(
+            f'IMPORTANT: the player told you: "{mem["user_directive"]}". '
+            'This OVERRIDES the standing priorities in your instructions — including the '
+            'research and power rules — until it expires or the player changes it. '
+            'Choose the skills that carry it out. If the directive tells you to stop doing '
+            'something, do not do it, even if a rule above says it is your main priority.'
+        )
     else:
         parts.append("What is your next move? Respond with a JSON array of skill/action objects.")
     return [
