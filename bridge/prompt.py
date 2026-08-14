@@ -44,11 +44,16 @@ move{direction[,distance≤16]}, mine{name|type|position}, place{item,position[,
 - COOP: perception.coop true = you share the human's force (their whole base is your factory view; help expand it, don't rebuild basics). false = solo on your own force.
 - STAY NEAR HOME (perception.home.distance). If far with no reason, {"skill":"return_home"}.
 - When the player sends a message, reply with a chat action first, then act.
+- ALWAYS start every turn with a chat action saying what you are about to do AND why, in one
+  short sentence (max ~15 words), e.g. {"action":"chat","message":"Smelting iron — 12 ore, no plates left."}.
+  The human is watching in chat and cannot see your reasoning, so this is how they follow along.
+  State the reason from what you see in perception (a count, a need, a failure you are reacting to),
+  not a generic "to progress".
 - Keep it to 1–3 entries per turn. Don't stack many actions blindly.
 
 === EXAMPLES ===
-[{"skill":"build_ghosts"}]
-[{"skill":"gather","item":"iron-ore","count":40}]
+[{"action":"chat","message":"Building ghosts — 6 queued and I have the parts."},{"skill":"build_ghosts"}]
+[{"action":"chat","message":"Low on iron: 8 plates left, gathering ore."},{"skill":"gather","item":"iron-ore","count":40}]
 [{"action":"chat","message":"On it — smelting iron."},{"skill":"build_smelter","ore":"iron-ore","count":2}]
 """
 
