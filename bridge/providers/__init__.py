@@ -30,6 +30,10 @@ class ProviderConfig:
     # producing text the mod throws away. Check the server's /v1/models
     # supported_parameters for "reasoning_effort" before setting this.
     reasoning_effort: str = ""
+    # Free-form extras merged into the request body, for server-specific switches the
+    # OpenAI schema has no field for — above all "stop thinking entirely", which is a
+    # different knob from reasoning_effort on servers that think by default.
+    extra_body: dict = field(default_factory=dict)
 
 
 def get_provider(config: ProviderConfig):

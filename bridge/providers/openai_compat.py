@@ -38,10 +38,17 @@ def complete(messages: list[dict], config: ProviderConfig) -> str | None:
         max_retries=0,
     )
 
-    # Sent through extra_body rather than as a named argument: the SDK only accepts
+    # Sent through extra_body rather than as named arguments: the SDK only accepts
     # reasoning_effort for models it knows, while any OpenAI-compatible server that
-    # supports it reads it straight off the request body.
-    extra_body = {"reasoning_effort": config.reasoning_effort} if config.reasoning_effort else None
+    # supports it reads it straight off the request body. extra_body carries anything
+    # else the server understands — notably the switch that turns thinking OFF, which
+    # is not reasoning_effort: a server can default to high-effort thinking and treat
+    # reasoning_effort as choosing between tiers, so only its own flag disables it
+    # (ds4-server: {"think": false}; others use {"thinking": {"type": "disabled"}}).
+    extra_body: dict | None = dict(config.extra_body) if config.extra_body else None
+    if config.reasoning_effort:
+        extra_body = extra_body or {}
+        extra_body["reasoning_effort"] = config.reasoning_effort
 
     try:
         response = client.chat.completions.create(

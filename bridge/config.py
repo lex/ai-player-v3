@@ -110,6 +110,9 @@ class BridgeConfig:
     # this is the API-level control, and on a model that advertises it, it is the
     # single biggest latency lever. Empty means "do not send the parameter".
     reasoning_effort: str = ""
+    # Extra request-body fields as a JSON object, for server-specific switches (e.g.
+    # {"think": false} to turn thinking off on a server that does it by default).
+    extra_body: dict = field(default_factory=dict)
 
     # RCON
     rcon: RCONConfig = field(default_factory=RCONConfig)
@@ -147,6 +150,7 @@ class BridgeConfig:
             max_tokens=self.max_tokens,
             temperature=self.temperature,
             reasoning_effort=self.reasoning_effort,
+            extra_body=self.extra_body,
         )
 
 
@@ -210,6 +214,17 @@ class ConfigLoader:
                 pass
         cfg.system_prefix = self._e("AI_SYSTEM_PREFIX", cfg.system_prefix)
         cfg.reasoning_effort = self._e("AI_REASONING_EFFORT", cfg.reasoning_effort)
+        extra_body = self._e("AI_EXTRA_BODY")
+        if extra_body:
+            try:
+                parsed = json.loads(extra_body)
+                if isinstance(parsed, dict):
+                    cfg.extra_body = parsed
+                else:
+                    log.warning("AI_EXTRA_BODY must be a JSON object, got %s — ignored",
+                                type(parsed).__name__)
+            except ValueError as e:
+                log.warning("AI_EXTRA_BODY is not valid JSON (%s) — ignored", e)
         cfg.rcon.host     = self._e("FACTORIO_RCON_HOST", cfg.rcon.host)
         port = self._e("FACTORIO_RCON_PORT")
         if port:
