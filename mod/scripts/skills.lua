@@ -763,8 +763,37 @@ local function skill_deconstruct(character, p)
   local radius = math.min(p.radius or 96, 200)
   local marked = surface.find_entities_filtered{
     to_be_deconstructed = true, position = character.position, radius = radius, limit = 100}
+
+  -- Nothing in range does not mean nothing marked. Perception counts marked entities across
+  -- the whole surface, and the prompt then REQUIRES this skill — so a mark 121 tiles away
+  -- with a 96 tile search produced a livelock: forced to deconstruct every turn, unable to
+  -- reach it, and (because that instruction says "and nothing else") unable even to say so.
+  -- Travel to it instead, the way build_ghosts already travels to ghost clusters.
   if #marked == 0 then
-    return false, "deconstruct: nothing marked for deconstruction within " .. radius .. " tiles"
+    local far = surface.find_entities_filtered{to_be_deconstructed = true, limit = 100}
+    local target, td = nil, math.huge
+    for _, e in ipairs(far) do
+      if e.valid and e ~= character then
+        local dx, dy = e.position.x - character.position.x, e.position.y - character.position.y
+        local d = dx * dx + dy * dy
+        if d < td then td = d; target = e end
+      end
+    end
+    if not target then
+      return false, "deconstruct: nothing is marked for deconstruction anywhere"
+    end
+    local spot = surface.find_non_colliding_position("character", target.position, 8, 0.5)
+    if not spot then
+      return false, string.format(
+        "deconstruct: the nearest mark is at {%d,%d} but there is nowhere to stand near it",
+        target.position.x, target.position.y)
+    end
+    character.teleport(spot)
+    marked = surface.find_entities_filtered{
+      to_be_deconstructed = true, position = character.position, radius = radius, limit = 100}
+    if #marked == 0 then
+      return false, "deconstruct: travelled to the mark but it vanished on arrival"
+    end
   end
 
   -- Nearest-first so the character walks an efficient path and stays near base.

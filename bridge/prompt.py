@@ -529,11 +529,23 @@ def build_messages(payload: dict, system_prefix: str = "", goal_note: str | None
             'look at the ghost list in perception, then gather or craft the items those '
             'ghosts need. Retry build_ghosts only once you have the items.'
         )
-    elif decon_count > 0:
+    elif decon_count > 0 and _failed_detail(results, "deconstruct") is None:
         parts.append(
             f'IMPORTANT: the human marked {decon_count} object(s) for deconstruction. '
-            'Your response MUST be exactly [{"skill":"deconstruct"}] and nothing else — '
-            'clearing what the human flagged comes before everything except building ghosts.'
+            'Respond with {"skill":"deconstruct"}, optionally preceded by one chat action '
+            'saying so — clearing what the human flagged comes before everything except '
+            'building ghosts.'
+        )
+    elif decon_count > 0:
+        # Same escape hatch build_ghosts has. Without it a mark the skill cannot reach —
+        # one 121 tiles away against a 96 tile search — pinned the agent in a livelock:
+        # required to deconstruct every turn, unable to, and forbidden from doing anything
+        # else, including explaining itself.
+        parts.append(
+            f'NOTE: {decon_count} object(s) are marked for deconstruction, but your last '
+            f'deconstruct FAILED ("{_failed_detail(results, "deconstruct")}"). Do NOT just '
+            'call deconstruct again unchanged — if it could not reach the mark, use goto to '
+            'travel there first, or get on with something useful instead.'
         )
     elif forced:
         parts.append(
