@@ -23,6 +23,8 @@ Respond with a JSON ARRAY of skill and/or action objects. ONLY the array — no 
 - {"skill":"gather","item":"<item>","count":50}   Mine the nearest sources until you have count. item e.g. "wood" (chops trees), "iron-ore", "copper-ore", "coal", "stone".
 - {"skill":"build_miner","resource":"iron-ore","output":"chest"}   Place a burner-mining-drill ON the nearest patch of resource, fuel it, and put a collector (output = chest | furnace | belt) at its drop position. Use this to AUTOMATE mining (iron-ore, copper-ore, coal, stone). Needs a burner-mining-drill in inventory.
 - {"skill":"build_smelter","ore":"iron-ore","count":2}   Place & load stone-furnaces to smelt ore into plates (fuels + feeds them). Needs the ore in inventory first (gather it).
+- {"skill":"build_mine_line","resource":"coal","count":6}   Build a ROW of drills on one patch, all feeding a shared belt that runs off the ore to a furnace on cleared ground. This is how you get real throughput — prefer it over placing drills one at a time.
+- {"skill":"run_base"}                KEEP THE BASE ALIVE: refuel every burner AND reload every empty furnace from your inventory, in one go. Use this whenever needs.burners_low_fuel or needs.machines_no_input is non-zero — a built machine that is idle produces exactly nothing.
 - {"skill":"fuel_all"}                Top up every nearby burner that's low on fuel (uses your coal).
 - {"skill":"deposit_to_chest"[,"keep":50]}   Empty your inventory into nearby chests, keeping `keep` of each item. Use this the moment your inventory is full — a full inventory silently breaks mining, crafting and building.
 - {"skill":"loot_chests"}             Take the contents of nearby chests into your inventory.
@@ -76,6 +78,9 @@ on the direction it faces. Aim it at a chest, a furnace or a belt. A drill facin
 ground piles ore on the floor and the mine is useless.
 
 === EARLY GAME BUILD ORDER (follow this; it is the standard opening) ===
+0. SCALE. One drill and one furnace is not a factory. Aim for ~20 drills on iron, ~6 on
+   copper, and MORE than that on coal, all feeding belts. Use build_mine_line, not
+   build_miner, once you have four or more drills to place.
 1. COAL FIRST. Place two burner drills FACING EACH OTHER on coal — each drops coal into the
    other's fuel slot, so the pair runs forever with no hand-feeding. Coal powers every burner
    machine you own, so this pays for itself immediately.
@@ -242,6 +247,26 @@ def next_objective(perception: dict) -> tuple[dict | None, str | None, str | Non
     # 1. COAL first. Everything in the burner age eats coal — the drills, the furnaces, the
     #    inserters — and a coal drill feeds the rest of the base, including itself. Mining
     #    iron first just means hand-feeding coal to the machine that mines it.
+    # 1a. Cannot expand without drills to place. They are cheap and made from what the
+    #     furnaces are already producing, so make a batch rather than stalling.
+    if drills < 20 and have("burner-mining-drill") == 0 and have("iron-plate") >= 12:
+        return (
+            {"skill": "craft", "recipe": "burner-mining-drill", "count": 4},
+            "Crafting more drills — can't expand mining without them.",
+            'craft drills: {"skill":"craft","recipe":"burner-mining-drill","count":4}. You have '
+            'no drills to place and a base this small needs many more. Each is 3 iron-gear-wheel '
+            '+ 3 iron-plate + 1 stone-furnace, all of which you can make from plates.',
+        )
+
+    if placed_on("coal") < 6 and have("burner-mining-drill") >= 4:
+        return (
+            {"skill": "build_mine_line", "resource": "coal", "count": 6},
+            "Building a row of coal drills — everything burns coal.",
+            'build a coal ROW first: {"skill":"build_mine_line","resource":"coal","count":6}. '
+            'Every burner machine you own eats coal, so you need MORE drills on coal than on '
+            'anything else — a base that cannot fuel itself simply stops.',
+        )
+
     if placed_on("coal") == 0 and have("burner-mining-drill") > 0:
         return (
             {"skill": "build_miner", "resource": "coal", "output": "chest"},
@@ -251,7 +276,18 @@ def next_objective(perception: dict) -> tuple[dict | None, str | None, str | Non
             'and itself. Iron can wait one turn.',
         )
 
-    # 2. Then iron, in quantity — it is what everything is made of.
+    # 2. Then iron, in quantity. One drill is not a base: a working factory wants roughly
+    #    twenty drills on iron, a handful on copper, and MORE than that on coal, because
+    #    every burner machine eats coal and a base that cannot fuel itself stops.
+    if drills < 20 and have("burner-mining-drill") >= 4:
+        return (
+            {"skill": "build_mine_line", "resource": "iron-ore", "count": 6},
+            "Building a row of iron drills onto a shared belt.",
+            'build a ROW, not one drill: {"skill":"build_mine_line","resource":"iron-ore",'
+            '"count":6}. You want roughly twenty drills on iron before this base is fed. '
+            'The belt carries the ore off the patch to a furnace on cleared ground.',
+        )
+
     if drills < 2 and have("burner-mining-drill") > 0:
         return (
             {"skill": "build_miner", "resource": "iron-ore", "output": "furnace"},
@@ -269,6 +305,37 @@ def next_objective(perception: dict) -> tuple[dict | None, str | None, str | Non
             f"Smelting the {ore} I have — no furnaces running yet.",
             f'smelt what you have with {{"skill":"build_smelter","ore":"{ore}","count":2}}. '
             'A stone furnace burns coal and needs NO electricity.',
+        )
+
+    # 2b. A built base that is idle is worth nothing. This outranks building anything new:
+    #     twelve furnaces at "no_ingredients" with 933 ore in the character's pockets
+    #     produce exactly as much as no furnaces at all.
+    needs = perception.get("needs") or {}
+
+    def need_count(key: str) -> int:
+        v = needs.get(key)
+        return len(v) if isinstance(v, list) else int(v or 0)
+
+    idle_inputs = need_count("machines_no_input")
+    low_fuel = need_count("burners_low_fuel")
+    ore_on_hand = have("iron-ore") + have("copper-ore") + have("stone")
+
+    if (idle_inputs > 0 and ore_on_hand > 0) or (low_fuel > 0 and have("coal") > 0):
+        return (
+            {"skill": "run_base"},
+            f"Feeding the base — {idle_inputs} machine(s) idle, {low_fuel} out of fuel.",
+            f'run your existing base first: {{"skill":"run_base"}}. {idle_inputs} machine(s) have '
+            f'no input and {low_fuel} burner(s) are out of fuel, while you are carrying the ore '
+            'and coal they need. Idle machines produce nothing, so this beats building more.',
+        )
+
+    # 2c. Out of coal with burners starving: everything in the burner age stops without it.
+    if low_fuel > 0 and have("coal") == 0:
+        return (
+            {"skill": "gather", "item": "coal", "count": 100},
+            "Mining coal — the burners have run dry.",
+            'mine coal: {"skill":"gather","item":"coal","count":100}. Burners are out of fuel and '
+            'you have none. Every drill and furnace you own stops without it.',
         )
 
     # 3. Keep the furnaces fed rather than idling.

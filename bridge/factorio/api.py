@@ -57,6 +57,8 @@ SKILLS: dict[str, list[str]] = {
     "explore":       [],
     "build_power":   [],
     "build_lab":     [],
+    "run_base":      [],
+    "build_mine_line": [],
 }
 
 # Directions the move action accepts

@@ -322,6 +322,134 @@ local function skill_build_miner(character, p)
 end
 
 -- -------------------------------------------------------------------------
+-- build_mine_line(resource, count, smelt) — a ROW of drills feeding one belt.
+--
+-- One drill and one chest is not a factory. A base needs roughly twenty drills on
+-- iron, a handful on copper and more than that on coal, because every burner machine
+-- eats coal and a base that cannot fuel itself stops. Placing those one at a time,
+-- each with its own chest, does not scale and leaves the ore in a box nobody empties.
+--
+-- So: a line of drills all facing the same way, a belt running under their drop
+-- positions, and the belt carried off the ore onto cleared ground where a furnace may
+-- legally stand (on this map a furnace on ore is destroyed, but a BELT on ore is fine).
+-- That is the smallest arrangement that actually smelts without a human in the loop.
+-- -------------------------------------------------------------------------
+local function skill_build_mine_line(character, p)
+  local resource = p.resource or p.item or "iron-ore"
+  local want = math.max(1, math.min(tonumber(p.count) or 6, 20))
+  local surface = character.surface
+  local inv = inv_of(character)
+
+  local have_drills = inv.get_item_count("burner-mining-drill")
+  if have_drills == 0 then
+    return false, "build_mine_line: no burner-mining-drill in inventory — craft some first " ..
+                  "(each is 3 iron-gear-wheel + 3 iron-plate + 1 stone-furnace)"
+  end
+  local count = math.min(want, have_drills)
+
+  -- A drill is 2x2 and we lay them west->east, so the row needs 2*count tiles of ore
+  -- with a free lane immediately south for the belt.
+  local best, best_d = nil, math.huge
+  local field = surface.find_entities_filtered{name = resource, type = "resource",
+                                               position = character.position, radius = 64}
+  for _, e in ipairs(field) do
+    local x, y = e.position.x, e.position.y
+    local ok = true
+    for i = 0, count - 1 do
+      if surface.count_entities_filtered{area = {{x + i * 2 - 0.9, y - 0.9},
+                                                 {x + i * 2 + 0.9, y + 0.9}},
+                                         name = resource, type = "resource"} == 0 then
+        ok = false break
+      end
+    end
+    if ok then
+      local dx, dy = x - character.position.x, y - character.position.y
+      local d = dx * dx + dy * dy
+      if d < best_d then best_d = d; best = {x = x, y = y} end
+    end
+  end
+  if not best then
+    return false, string.format(
+      "build_mine_line: no run of %d '%s' tiles within 64 — try a smaller count or explore",
+      count, resource)
+  end
+
+  -- Drills face south, so every drop position lands on the same row one tile below.
+  local placed, drops = 0, {}
+  for i = 0, count - 1 do
+    local pos = {x = best.x + i * 2, y = best.y}
+    if AIActions.run(character, {action = "place", item = "burner-mining-drill",
+                                 position = pos, direction = "south"}) then
+      placed = placed + 1
+      local d = surface.find_entities_filtered{name = "burner-mining-drill",
+                                               position = pos, radius = 1.5}[1]
+      if d then
+        drops[#drops + 1] = d.drop_position
+        AIActions.run(character, {action = "insert", item = "coal", count = 10,
+                                  position = d.position, inventory = "fuel"})
+      end
+    end
+  end
+  if placed == 0 then
+    return false, "build_mine_line: could not place any drill on that run — try clear_area"
+  end
+
+  -- Belt along the drop row, carrying east toward the end of the line.
+  local belts = 0
+  for _, d in ipairs(drops) do
+    if inv.get_item_count("transport-belt") > 0 and
+       AIActions.run(character, {action = "place", item = "transport-belt",
+                                 position = d, direction = "east"}) then
+      belts = belts + 1
+    end
+  end
+
+  -- Carry the belt off the ore until it reaches ground a furnace may legally occupy.
+  local detail = string.format("built %d drill(s) on %s with %d belt(s)", placed, resource, belts)
+  if #drops > 0 and p.smelt ~= false then
+    local tail = drops[#drops]
+    local fx, fy = tail.x, tail.y
+    local steps = 0
+    while steps < 16 and inv.get_item_count("transport-belt") > 0 do
+      fx = fx + 1
+      if surface.count_entities_filtered{position = {fx, fy}, radius = 0.4,
+                                         type = "resource"} == 0 then
+        break   -- off the ore: a furnace can stand here
+      end
+      AIActions.run(character, {action = "place", item = "transport-belt",
+                                position = {x = fx, y = fy}, direction = "east"})
+      steps = steps + 1
+    end
+
+    local spot = surface.find_non_colliding_position("stone-furnace", {x = fx + 2, y = fy}, 6, 1)
+    if spot and surface.count_entities_filtered{area = {{spot.x - 1, spot.y - 1},
+                                                        {spot.x + 1, spot.y + 1}},
+                                                type = "resource"} == 0
+       and inv.get_item_count("stone-furnace") > 0 then
+      if AIActions.run(character, {action = "place", item = "stone-furnace", position = spot}) then
+        AIActions.run(character, {action = "insert", item = "coal", count = 10,
+                                  position = spot, inventory = "fuel"})
+        detail = detail .. " feeding a furnace off the patch"
+        if inv.get_item_count("burner-inserter") > 0 then
+          AIActions.run(character, {action = "place", item = "burner-inserter",
+                                    position = {x = fx + 1, y = fy}, direction = "east"})
+          detail = detail .. " via a burner-inserter"
+        else
+          detail = detail .. " (no burner-inserter to load it — craft one)"
+        end
+      end
+    else
+      detail = detail .. " — belt ends on ore, so no furnace could be placed; clear_area at the end of the belt"
+    end
+  end
+
+  if inv.get_item_count("coal") == 0 then
+    detail = detail .. ". NOTE: no coal left, so these drills will stall — mine coal next"
+  end
+  return true, detail
+end
+
+-- -------------------------------------------------------------------------
 -- fuel_all() — top up every nearby AI-force burner that's low on fuel.
 -- -------------------------------------------------------------------------
 local function skill_fuel_all(character, _)
@@ -346,6 +474,96 @@ local function skill_fuel_all(character, _)
   end
   if fueled == 0 then return false, "fuel_all: nothing nearby needed fuel" end
   return true, string.format("fueled %d burner(s)", fueled)
+end
+
+-- -------------------------------------------------------------------------
+-- run_base(radius?) — keep what is already built actually RUNNING: refuel the
+-- burners and refill the smelters from the inventory.
+--
+-- This is the skill the agent was missing entirely. It could build a base and then
+-- watch it die: twelve stone furnaces sitting at "no_ingredients" while 933 iron ore
+-- sat in the character's pockets, and three drills stopped at "no_fuel" — every
+-- machine idle, every production rate zero. build_smelter only loads the furnaces it
+-- places, and nothing ever went back to top them up.
+--
+-- Fuel first (an unfuelled furnace cannot smelt whatever you put in it), then ore,
+-- spread evenly so twelve furnaces each get a share rather than the first one taking
+-- the lot.
+-- -------------------------------------------------------------------------
+local SMELTABLE = {"iron-ore", "copper-ore", "stone"}
+
+local function skill_run_base(character, p)
+  local surface = character.surface
+  local inv = inv_of(character)
+  local radius = math.min(tonumber(p.radius) or 96, 200)
+  local force = AICharacter.get_force()
+
+  local fuelled, fed, skipped_no_stock = 0, 0, {}
+
+  local machines = surface.find_entities_filtered{force = force, position = character.position,
+                                                  radius = radius}
+  -- Count furnaces first so the ore can be shared out instead of dumped into one.
+  local furnaces = 0
+  for _, e in ipairs(machines) do
+    if e.valid and e.type == "furnace" then furnaces = furnaces + 1 end
+  end
+
+  for _, e in ipairs(machines) do
+    if e.valid and e.type ~= "character" then
+      -- 1. Fuel anything burning.
+      local fb = e.get_fuel_inventory and e.get_fuel_inventory()
+      if fb and fb.valid and fb.get_item_count("coal") < 5 then
+        local avail = inv.get_item_count("coal")
+        if avail > 0 then
+          local ins = fb.insert{name = "coal", count = math.min(10, avail)}
+          if ins > 0 then inv.remove{name = "coal", count = ins}; fuelled = fuelled + 1 end
+        else
+          skipped_no_stock["coal"] = true
+        end
+      end
+
+      -- 2. Feed the smelters from whatever ore is on hand.
+      if e.type == "furnace" then
+        local src = e.get_inventory(defines.inventory.furnace_source)
+        if src and src.valid and src.is_empty() then
+          local loaded = false
+          for _, ore in ipairs(SMELTABLE) do
+            local held = inv.get_item_count(ore)
+            if held > 0 then
+              -- Even share, with a floor so a small stock still gets somewhere useful.
+              local share = math.max(10, math.floor(held / math.max(furnaces, 1)))
+              local ins = src.insert{name = ore, count = math.min(share, held, 50)}
+              if ins > 0 then
+                inv.remove{name = ore, count = ins}
+                fed = fed + 1
+                loaded = true
+                break
+              end
+            end
+          end
+          if not loaded then skipped_no_stock["ore"] = true end
+        end
+      end
+    end
+  end
+
+  if fuelled == 0 and fed == 0 then
+    local missing = {}
+    for k in pairs(skipped_no_stock) do missing[#missing + 1] = k end
+    if #missing > 0 then
+      return false, "run_base: machines are idle but you have no " ..
+        table.concat(missing, " or ") .. " to give them — mine some first"
+    end
+    return true, "run_base: everything nearby is already fuelled and fed"
+  end
+
+  local detail = string.format("refuelled %d machine(s), loaded %d furnace(s)", fuelled, fed)
+  local out = {}
+  for k in pairs(skipped_no_stock) do out[#out + 1] = k end
+  if #out > 0 then
+    detail = detail .. " — ran out of " .. table.concat(out, " and ")
+  end
+  return true, detail
 end
 
 -- -------------------------------------------------------------------------
@@ -1027,6 +1245,8 @@ AISkills.REGISTRY = {
   build_miner      = skill_build_miner,
   build_smelter    = skill_build_smelter,
   fuel_all         = skill_fuel_all,
+  run_base         = skill_run_base,
+  build_mine_line  = skill_build_mine_line,
   loot_chests      = skill_loot_chests,
   deposit_to_chest = skill_deposit_to_chest,
   return_home      = skill_return_home,
