@@ -86,6 +86,73 @@ def _failed_detail(results, name: str) -> str | None:
     return None
 
 
+def _next_objective(perception: dict) -> str | None:
+    """
+    The one thing that most needs doing, computed from perception rather than left to
+    the model's judgement.
+
+    The system prompt states standing priorities (research is the progress marker, keep
+    power healthy) but says nothing about ORDER, so the agent would reach for the most
+    advanced-sounding goal — building steam power while owning no working mine and no
+    smelting. Nothing in a burner-age base even needs electricity: burner drills and
+    stone furnaces run on coal, and only the lab draws power.
+
+    So walk an explicit ladder, cheapest prerequisite first, and hand the model the
+    single next step. Returns None once the base is past the bootstrap, leaving the
+    model free to plan.
+    """
+    inv = {i.get("name"): i.get("count", 0) for i in (perception.get("inventory") or [])}
+    built = perception.get("factory", {}).get("by_type") or {}
+    power = perception.get("power") or {}
+    research = perception.get("research") or {}
+
+    def have(name: str) -> int:
+        return int(inv.get(name, 0) or 0)
+
+    def placed(*names: str) -> int:
+        return sum(int(built.get(n, 0) or 0) for n in names)
+
+    drills = placed("burner-mining-drill", "electric-mining-drill")
+    furnaces = placed("stone-furnace", "steel-furnace", "electric-furnace")
+    labs = placed("lab")
+
+    def step(text: str) -> str:
+        return ("NEXT OBJECTIVE (this is the most useful thing you can do right now — "
+                "do it before anything else, and ignore longer-term goals until it is "
+                f"done): {text}")
+
+    # 1. Ore in the ground is worth nothing: get automated mining running first.
+    if drills == 0 and have("burner-mining-drill") > 0:
+        return step('place a mine with {"skill":"build_miner","resource":"iron-ore",'
+                    '"output":"chest"}. You have a burner-mining-drill in your inventory '
+                    'and nothing is being mined automatically. A burner drill needs NO '
+                    'electricity — do not build power for it.')
+
+    # 2. Ore is useless without plates, and a stone furnace also needs no power.
+    if furnaces == 0 and (have("iron-ore") > 0 or have("copper-ore") > 0):
+        ore = "iron-ore" if have("iron-ore") >= have("copper-ore") else "copper-ore"
+        return step(f'smelt what you have with {{"skill":"build_smelter","ore":"{ore}",'
+                    '"count":2}. A stone furnace burns coal and needs NO electricity.')
+
+    # 3. Keep the furnaces fed rather than idling.
+    if furnaces > 0 and have("iron-ore") == 0 and have("iron-plate") < 30:
+        return step('gather ore to feed your furnaces: '
+                    '{"skill":"gather","item":"iron-ore","count":60}.')
+
+    # 4. A lab does nothing until something is queued, and queuing costs nothing.
+    if not research.get("current") and (labs > 0 or have("automation-science-pack") > 0):
+        return step('queue a technology with {"skill":"research"} — you have lab capacity '
+                    'but nothing is being researched, so no progress is being made.')
+
+    # 5. Only now is power worth building, and only if something actually wants it.
+    if labs > 0 and not power.get("has_grid") and int(power.get("machines_no_power", 0) or 0) > 0:
+        return step('build electricity with {"skill":"build_power","count":1} — you have '
+                    'machines that need power and no grid. This is the FIRST point at '
+                    'which power is worth building.')
+
+    return None
+
+
 def build_messages(payload: dict, system_prefix: str = "") -> list[dict]:
     system = SYSTEM_PROMPT
     if system_prefix:
@@ -175,6 +242,8 @@ def build_messages(payload: dict, system_prefix: str = "") -> list[dict]:
             'Choose the skills that carry it out. If the directive tells you to stop doing '
             'something, do not do it, even if a rule above says it is your main priority.'
         )
+    elif objective := _next_objective(perception):
+        parts.append(objective)
     else:
         parts.append("What is your next move? Respond with a JSON array of skill/action objects.")
     return [
