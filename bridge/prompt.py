@@ -27,7 +27,7 @@ Respond with a JSON ARRAY of skill and/or action objects. ONLY the array — no 
 - {"skill":"research"[,"tech":"automation"]}   Queue a technology on your force (picks one if you omit tech). REQUIRED before any research can progress — a lab does NOTHING until research is queued.
 - {"skill":"return_home"}             Walk back to your base anchor (use if you've wandered far).
 - {"skill":"craft","recipe":"<recipe>","count":1}   Hand-craft a recipe. Auto-crafts intermediates from raw materials; if it can't, it tells you exactly which ingredient is short. Prefer this over the craft primitive.
-- {"skill":"clear_area","radius":12}   Mine the trees and rocks around you. Use this whenever a build skill reports it could not place something because the ground is blocked.
+- {"skill":"clear_area","radius":12}   Mine the trees, rocks AND ore around you to make buildable ground. Use this whenever a build skill says the ground is blocked or that it needs ore-free ground. On an ore-covered map this is how you create somewhere to build — the ore is the ground.
 - {"skill":"explore","direction":"east","distance":128}   Travel outward to reveal new ground and report which ore patches are there. Use when you need a resource that isn't in perception.
 - {"skill":"build_power","count":1}   The whole vanilla steam starter in one step: offshore pump on water, boiler fuelled with coal, steam engine(s), and a pole. Needs offshore-pump, boiler, steam-engine and small-electric-pole in inventory. Do NOT assemble this from place actions yourself — the geometry is fiddly and this handles it.
 - {"skill":"build_lab","count":1}   Place lab(s) and load whatever science packs you carry. Remember a lab does nothing until research is queued.
@@ -37,6 +37,56 @@ Respond with a JSON ARRAY of skill and/or action objects. ONLY the array — no 
 move{direction[,distance≤16]}, mine{name|type|position}, place{item,position[,direction]}, set_recipe{recipe,position}, craft{recipe,count}, insert{item,count,position[,inventory]}, take{item,count,position[,inventory]}, pickup{position}, chat{message}, add_note{text}, summary{text}, wait{}.
 (To get WOOD use gather item "wood" or mine type "tree". Directions are strings: north/east/south/west/…)
 
+=== HOW FACTORIO ACTUALLY WORKS (verified against this game's prototypes) ===
+POWER — most early machines need NONE. A burner drill, stone furnace and burner inserter
+all run on coal, so a complete mine-and-smelt base works with no electricity at all. Only
+labs, electric drills, assemblers and radars draw power. Do not build power before you own
+something electric that is actually starved (perception.power.machines_no_power > 0).
+When you do: 1 boiler feeds 2 steam engines, and 1 offshore pump feeds ~20 boilers.
+
+RATES — burner mining drill mines 0.25 items/second. A stone furnace (speed 1) smelts one
+iron plate every 3.2s, so it eats ~0.31 ore/second: roughly ONE drill feeds ONE furnace.
+An electric drill is twice as fast (0.5) but needs power. Steel furnace is twice a stone one.
+Do not build ten furnaces for one drill — they will sit empty.
+
+FUEL — every burner machine consumes coal and stops silently when it runs out. Keep coal
+in your inventory and use fuel_all when needs.burners_low_fuel is non-empty. A drill with
+no coal looks identical to a working one in the entity list.
+
+RECIPES you need early (this game's actual numbers):
+  iron-gear-wheel        = 2 iron-plate
+  automation-science-pack (red) = 4 copper-plate + 1 iron-gear-wheel
+  iron-chest             = 8 iron-plate
+  stone-furnace          = 5 stone
+  burner-mining-drill    = 3 iron-gear-wheel + 3 iron-plate + 1 stone-furnace
+  transport-belt         = 1 iron-gear-wheel + 1 iron-plate (makes 2)
+A lab consumes science packs only while a technology is queued — an unqueued lab is inert.
+
+DRILL OUTPUT — a mining drill drops its ore on ONE tile, the drop position, which depends
+on the direction it faces. Aim it at a chest, a furnace or a belt. A drill facing empty
+ground piles ore on the floor and the mine is useless.
+
+=== THIS MAP: DANGER ORES ===
+The ground itself is ore, and that changes the rules:
+- Only these may stand on an ore tile (the map destroys anything else placed there and
+  refunds the item to you):
+      belts and underground belts, mining drills, electric poles, lamps,
+      pipes / pipe-to-ground / pumps, rails, signals, train stops, wagons, cars.
+  NOT allowed on ore, however sensible they look: INSERTERS, SPLITTERS, chests, furnaces,
+  assemblers, labs, boilers, steam engines. A furnace on ore is not "blocked" — it will
+  vanish the instant you place it.
+- That shapes how a mine is built here. A drill may sit on ore, but the inserter or chest
+  that would take its output may NOT. Aim the drill's output onto a BELT (legal on ore) and
+  run the belt to cleared ground, or clear the ore where the chest is going to stand.
+- Buildable ground is something you MAKE: mine the ore away with
+  {"skill":"clear_area","radius":8}, then build on the cleared patch.
+- So the normal loop is: clear_area -> build there. If a build skill says it needs ore-free
+  ground, clear_area is the answer, not a different position.
+- Ore is mixed: a patch is not one resource, and it gets more mixed further out. A drill
+  takes whatever is beneath it, so expect mixed output and sort it later.
+- Ore is effectively unlimited here, so do not hunt for "a better patch" — clear ground and
+  build where you already are.
+
 === RULES ===
 - If ghosts.count > 0, do {"skill":"build_ghosts"} FIRST, before anything else — this is the human telling you what to build.
 - Else if deconstruction.count > 0, do {"skill":"deconstruct"} NEXT — the human marked those objects to be removed; clearing them comes before everything except building ghosts.
@@ -44,7 +94,7 @@ move{direction[,distance≤16]}, mine{name|type|position}, place{item,position[,
 - React to "Results of your last actions": never repeat a FAILED entry unchanged. If a skill says it needs an item, gather/craft it, then retry.
 - Use needs[] to pick maintenance: burners_low_fuel → fuel_all; etc.
 - perception.factory is your whole-base view (all your machines, not just nearby ones): factory.summary.by_type/by_status are counts; factory.total is how many machines you have; factory.attention lists the machines that need action (nearest first) — fix those. factory.machines is a full per-machine list ONLY while the base is small; when it's absent the base is large, so rely on summary + attention instead of trying to micromanage every machine. perception.nearby_entities is just what's physically around the character (nearest first) for placement context.
-- RESEARCH = your main progress marker (perception.game_phase tracks it). If perception.research.current is null, NOTHING is queued — queue the next tech for your phase with {"skill":"research"} and keep labs fed. ONLY in phase 0 (no red science yet) do you BOOTSTRAP: hand-craft automation-science-pack (1 copper-plate + 1 iron-gear-wheel; gear = 2 iron-plate) to auto-trigger the first tech, then place a lab and feed it. Past phase 0 do NOT hand-craft red science to "restart" — just queue research.
+- RESEARCH = your main progress marker (perception.game_phase tracks it). If perception.research.current is null, NOTHING is queued — queue the next tech for your phase with {"skill":"research"} and keep labs fed. ONLY in phase 0 (no red science yet) do you BOOTSTRAP: hand-craft automation-science-pack (4 copper-plate + 1 iron-gear-wheel; gear = 2 iron-plate) to auto-trigger the first tech, then place a lab and feed it. Past phase 0 do NOT hand-craft red science to "restart" — just queue research.
 - POWER: perception.power shows grid health (has_grid, production_kw, consumption_kw, machines_no_power, machines_low_power). If has_grid is true and machines_no_power + machines_low_power are 0, power is SUFFICIENT — do NOT build boilers/steam/power. Only build power when there's no grid or machines report no_power/low_power.
 - COOP: perception.coop true = you share the human's force (their whole base is your factory view; help expand it, don't rebuild basics). false = solo on your own force.
 - STAY NEAR HOME (perception.home.distance). If far with no reason, {"skill":"return_home"}.

@@ -15,6 +15,36 @@ local function inv_of(character)
   return character.get_inventory(defines.inventory.character_main)
 end
 
+-- Find a spot for `proto` that is both physically free AND clear of ore.
+--
+-- find_non_colliding_position alone is not enough on a Danger Ores map: ore entities have
+-- no collision box, so it happily returns a tile buried in iron. The scenario then destroys
+-- whatever is built there, because those maps allow only belts, drills and power poles on
+-- ore — the building silently vanishes and the skill looks like it worked.
+--
+-- Falls back to the plain non-colliding position when nothing ore-free is within range, so
+-- ordinary maps behave exactly as before.
+local function find_clear_position(surface, proto, anchor, radius)
+  local fallback = surface.find_non_colliding_position(proto, anchor, radius, 1)
+  for r = 0, radius, 2 do
+    for _, off in ipairs({{r, 0}, {-r, 0}, {0, r}, {0, -r}, {r, r}, {-r, -r}, {r, -r}, {-r, r}}) do
+      local probe = {x = anchor.x + off[1], y = anchor.y + off[2]}
+      local pos = surface.find_non_colliding_position(proto, probe, 3, 1)
+      if pos then
+        local box = prototypes.entity[proto] and prototypes.entity[proto].selection_box
+        local area = box
+          and {{pos.x + box.left_top.x, pos.y + box.left_top.y},
+               {pos.x + box.right_bottom.x, pos.y + box.right_bottom.y}}
+          or {{pos.x - 0.5, pos.y - 0.5}, {pos.x + 0.5, pos.y + 0.5}}
+        if #surface.find_entities_filtered{area = area, type = "resource"} == 0 then
+          return pos, true
+        end
+      end
+    end
+  end
+  return fallback, false
+end
+
 -- -------------------------------------------------------------------------
 -- gather(item, count) — mine the nearest sources of `item` until `count`.
 -- Handles wood (mine trees by type) and ores/rocks (mine by name).
@@ -83,7 +113,13 @@ local function skill_build_smelter(character, p)
   local placed = 0
   for i = 1, count do
     local anchor = {x = base.x + i * 2, y = base.y - 1}
-    local pos = surface.find_non_colliding_position("stone-furnace", anchor, 6, 1)
+    local pos, clear = find_clear_position(surface, "stone-furnace", anchor, 12)
+    if pos and not clear then
+      -- Every nearby spot is on ore; a furnace there would be destroyed by the map rule.
+      return false, "build_smelter: no ore-free ground within 12 tiles — furnaces cannot be " ..
+                    "built on ore on this map. Run {\"skill\":\"clear_area\",\"radius\":8} to mine " ..
+                    "the ore away, then retry."
+    end
     if pos then
       local ok = AIActions.run(character, {action = "place", item = "stone-furnace", position = pos})
       if ok then
@@ -208,23 +244,67 @@ local function skill_build_miner(character, p)
   AIActions.run(character, {action = "insert", item = "coal", count = 5,
                             position = drill.position, inventory = "fuel"})
 
-  -- place the collector at the drill's drop_position
-  local drop = drill.drop_position
+  -- Aim the drill before choosing a collector. Placement used to take the first
+  -- direction that happened to fit, which is always "south", so every drill faced the
+  -- same way and dropped its ore wherever that landed — often onto more ore, where a
+  -- chest cannot go.
+  --
+  -- That matters beyond tidiness on an ore-covered map. Danger Ores scenarios allow only
+  -- belts, drills and power poles on ore tiles and destroy anything else placed there, so
+  -- a chest on the drop tile is not merely blocked, it is against the rules of the map.
+  -- Rotate to a facing whose drop tile is clear of ore, and fall back to a belt (always
+  -- legal on ore) when every facing drops onto the patch.
+  local function ore_at(pos)
+    return #surface.find_entities_filtered{position = pos, radius = 0.4, type = "resource"} > 0
+  end
+
+  local ALL_DIRS = {defines.direction.north, defines.direction.east,
+                    defines.direction.south, defines.direction.west}
+  local chosen_drop, on_ore = nil, false
+  for _, dir in ipairs(ALL_DIRS) do
+    drill.direction = dir
+    local d = drill.drop_position
+    if not ore_at(d) then
+      chosen_drop = d
+      break
+    end
+    chosen_drop = chosen_drop or d   -- remember one, in case every facing is on ore
+    on_ore = true
+  end
+  if chosen_drop and not ore_at(chosen_drop) then on_ore = false end
+
+  local drop = chosen_drop or drill.drop_position
   local detail = "placed burner-mining-drill on " .. resource
-  if inv.get_item_count(out_item) > 0 then
-    if AIActions.run(character, {action = "place", item = out_item, position = drop}) then
-      detail = detail .. " + " .. out_item .. " at drop position"
-      if out_item == "stone-furnace" and inv.get_item_count("coal") > 0 then
+
+  -- On ore, only a belt is legal; elsewhere use what was asked for.
+  local collector = on_ore and "transport-belt" or out_item
+  if on_ore then
+    detail = detail .. " (every facing drops onto ore, so using a belt — chests are not"
+                    .. " allowed on ore here)"
+  end
+
+  if inv.get_item_count(collector) == 0 and collector == "iron-chest" then
+    -- 8 iron plates; cheap enough to just make one rather than fail the whole loop.
+    if character.begin_crafting{recipe = "iron-chest", count = 1} > 0 then
+      detail = detail .. " — out of iron-chest, crafting one; re-run to attach it"
+      return true, detail
+    end
+  end
+
+  if inv.get_item_count(collector) > 0 then
+    if AIActions.run(character, {action = "place", item = collector, position = drop}) then
+      detail = detail .. " + " .. collector .. " at its drop position"
+      if collector == "stone-furnace" and inv.get_item_count("coal") > 0 then
         AIActions.run(character, {action = "insert", item = "coal", count = 5,
                                   position = drop, inventory = "fuel"})
       end
     else
       detail = detail .. string.format(" (couldn't place %s at drop {%d,%d})",
-        out_item, math.floor(drop.x), math.floor(drop.y))
+        collector, math.floor(drop.x), math.floor(drop.y))
     end
   else
     detail = detail .. string.format(" — no %s to collect output; place one at {%d,%d}",
-      out_item, math.floor(drop.x), math.floor(drop.y))
+      collector, math.floor(drop.x), math.floor(drop.y))
   end
   return true, detail
 end
@@ -624,29 +704,46 @@ local function skill_craft(character, p)
 end
 
 -- -------------------------------------------------------------------------
--- clear_area(radius) — mine trees and rocks around the character to make room.
--- Placement fails on blocked tiles, so this is the fix when a build skill keeps
--- reporting it cannot place anything.
+-- clear_area(radius) — mine trees, rocks and (on ore-covered maps) the ore
+-- itself, to make buildable ground.
+--
+-- On a Danger Ores map this is the core loop of the whole scenario: the ground is
+-- ore, only belts/drills/poles may be built on ore, and the way you get somewhere
+-- to build is to mine the ore away. The ore also becomes MIXED as the map goes on,
+-- so late on there may be no naturally clear ground anywhere near the base — which
+-- makes "mine it clear" the only option rather than an optimisation. Ore is mined
+-- last so trees and rocks (cheap, and blocking) go first.
 -- -------------------------------------------------------------------------
 local function skill_clear_area(character, p)
   local radius = math.max(4, math.min(tonumber(p.radius) or 12, 32))
   local surface = character.surface
   local inv = inv_of(character)
   local cleared = 0
+  -- include_ore defaults ON: the caller asking to clear ground on an ore map means
+  -- the ore too, and on a normal map there is simply no ore to find.
+  local include_ore = p.include_ore ~= false
 
   for _ = 1, 120 do
+    local types = include_ore and {"tree", "simple-entity", "resource"}
+                               or {"tree", "simple-entity"}
     local blockers = surface.find_entities_filtered{
       position = character.position, radius = radius,
-      type = {"tree", "simple-entity"}, limit = 40,
+      type = types, limit = 40,
     }
     local target, td = nil, math.huge
+    local ore_target, ore_d = nil, math.huge
     for _, e in ipairs(blockers) do
       if e.valid and e.minable then
         local dx, dy = e.position.x - character.position.x, e.position.y - character.position.y
         local d = dx * dx + dy * dy
-        if d < td then td = d; target = e end
+        if e.type == "resource" then
+          if d < ore_d then ore_d = d; ore_target = e end
+        elseif d < td then
+          td = d; target = e
+        end
       end
     end
+    target = target or ore_target   -- trees and rocks first, then dig into the ore
     if not target then break end
     local sp = surface.find_non_colliding_position("character", target.position, 3, 0.5)
     if sp then character.teleport(sp) end
@@ -663,7 +760,8 @@ local function skill_clear_area(character, p)
   if cleared == 0 then
     return true, string.format("clear_area: nothing to clear within %d tiles", radius)
   end
-  return true, string.format("cleared %d obstacle(s) within %d tiles", cleared, radius)
+  return true, string.format("cleared %d obstacle(s)%s within %d tiles — there should be "
+    .. "buildable ground here now", cleared, include_ore and " (including ore)" or "", radius)
 end
 
 -- -------------------------------------------------------------------------
@@ -819,8 +917,13 @@ local function skill_build_lab(character, p)
   local surface = character.surface
   local placed = 0
   for i = 1, math.min(want, have) do
-    local spot = surface.find_non_colliding_position("lab",
-      {x = character.position.x + i * 4, y = character.position.y + 4}, 12, 1)
+    local spot, clear = find_clear_position(surface, "lab",
+      {x = character.position.x + i * 4, y = character.position.y + 4}, 12)
+    if spot and not clear then
+      return false, "build_lab: no ore-free ground within 12 tiles — a lab on ore would be " ..
+                    "destroyed by this map's rules. Run {\"skill\":\"clear_area\",\"radius\":8} " ..
+                    "first, then retry."
+    end
     if spot and AIActions.run(character, {action = "place", item = "lab", position = spot}) then
       placed = placed + 1
       for _, pack in ipairs(SCIENCE_PACKS) do
