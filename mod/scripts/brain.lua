@@ -20,7 +20,10 @@ AIBrain = {}
 -- ("Unknown request id"). The bridge pushes the derived value into
 -- storage.ai_player.request_timeout_ticks via RCON at startup (single source =
 -- AI_TIMEOUT); this constant is only the fallback when the bridge hasn't set it.
-local DEFAULT_REQUEST_TIMEOUT_TICKS = 18000  -- 300s at 60 tps
+-- 600s at 60 tps. A local reasoning model can spend minutes on one prompt, and the
+-- previous 300s default expired those requests mid-flight: the bridge was still waiting,
+-- and its eventual answer came back to a request id the mod had already dropped.
+local DEFAULT_REQUEST_TIMEOUT_TICKS = 36000
 
 -- -------------------------------------------------------------------------
 -- Config helpers

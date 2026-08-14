@@ -57,6 +57,30 @@ remote.add_interface("ai_player", {
   set_coop = function(enabled)
     return AICharacter.set_coop(enabled == true)
   end,
+  -- Bridge lifecycle. These exist because a console script (/silent-command, RCON)
+  -- runs in the *scenario's* Lua context, where storage.ai_player is nil -- writing the
+  -- mod's storage from there is a silent no-op. remote.call dispatches into this mod's
+  -- context, so it can actually touch storage.
+  --
+  -- How long to wait for a bridge response before dropping a pending request. The bridge
+  -- derives this from AI_TIMEOUT and pushes it in at startup, so the two never disagree.
+  set_request_timeout = function(ticks)
+    local t = tonumber(ticks)
+    if not t or t <= 0 then
+      return { ok = false, detail = "ticks must be a positive number" }
+    end
+    storage.ai_player.request_timeout_ticks = math.floor(t)
+    return { ok = true, ticks = storage.ai_player.request_timeout_ticks }
+  end,
+  -- Drop every in-flight request. The bridge calls this when it restarts while Factorio
+  -- keeps running: those request ids are stale, and the mod will not issue a new request
+  -- while one is pending, so without this the AI stalls until the timeout above elapses.
+  clear_pending_requests = function()
+    local n = 0
+    for _ in pairs(storage.ai_player.pending_requests) do n = n + 1 end
+    storage.ai_player.pending_requests = {}
+    return { ok = true, cleared = n }
+  end,
 })
 
 -- -------------------------------------------------------------------------

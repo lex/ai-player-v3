@@ -175,19 +175,30 @@ class RCONGateway:
         keeps running — old request IDs are stale and the mod would block indefinitely
         waiting for responses that will never arrive.
 
-        Sent as the mod's own /ai-clear command, NOT as /silent-command touching
+        Goes through the mod's remote interface, NOT /silent-command touching
         storage.ai_player: a console script runs in the *scenario's* Lua context, where
         `storage` is the running scenario's table and storage.ai_player is always nil.
         Poking it from there is a silent no-op, so the mod kept its in-flight request and
         refused to ask anything new until that request hit its own timeout — the bridge
         looked alive but the AI stood still for minutes after every bridge restart.
-        Commands registered by the mod do run in the mod's context, so /ai-clear works.
+        remote.call dispatches into the mod's own context, where storage is the mod's.
+
+        Falls back to the /ai-clear console command, which is also mod-registered and so
+        also runs in the right context, for mod versions without the remote function.
         """
+        result = self.query_lua(
+            "local r = remote.call('ai_player', 'clear_pending_requests') "
+            "rcon.print('cleared ' .. tostring(r and r.cleared))"
+        )
+        if result is not None and "cleared" in result:
+            log.info("clear_pending_requests: %s", result.strip())
+            return True
+
         result = self._send("/ai-clear")
         if result is not None:
-            log.info("clear_pending_requests: sent /ai-clear")
+            log.info("clear_pending_requests: sent /ai-clear (remote unavailable)")
             return True
-        log.warning("clear_pending_requests: /ai-clear failed — the mod may still be "
+        log.warning("clear_pending_requests: failed — the mod may still be "
                     "holding a stale request until it times out")
         return False
 
@@ -198,26 +209,26 @@ class RCONGateway:
         so the mod never expires a request before the model's allotted reply time.
         Single source of truth = AI_TIMEOUT in the bridge.
 
-        KNOWN LIMITATION: this does not currently reach the mod. Like clear_pending_requests
-        before it, the Lua below runs in the scenario's context, where storage.ai_player is
-        nil, so the assignment is a silent no-op and the mod keeps its own
-        DEFAULT_REQUEST_TIMEOUT_TICKS (300s) regardless of AI_TIMEOUT. Harmless while turns
-        finish well inside 300s, but with AI_TIMEOUT above that the mod can expire a request
-        the bridge is still waiting on, and the late reply is rejected as an unknown id.
-        Fixing it properly needs a mod-side entry point (a remote interface function or a
-        console command), since only mod-registered code can write the mod's storage.
+        Goes through the mod's remote interface for the same reason as
+        clear_pending_requests: a console script cannot write the mod's storage, so the
+        previous inline assignment silently did nothing and the mod ran on its own default
+        no matter what AI_TIMEOUT said.
         """
         ticks = int(seconds * 60)
-        lua = (
-            "if storage.ai_player then "
-            f"storage.ai_player.request_timeout_ticks={ticks} "
-            f"game.print('[AI Bridge] Request timeout set to {int(seconds)}s') "
-            "else game.print('[AI Bridge] No AI state to configure') end"
+        result = self.query_lua(
+            f"local r = remote.call('ai_player', 'set_request_timeout', {ticks}) "
+            "rcon.print('ticks=' .. tostring(r and r.ticks))"
         )
-        result = self.query_lua(lua)
-        if result is not None:
-            log.info("set_request_timeout: %ds (%d ticks)", int(seconds), ticks)
+        if result is not None and "ticks=" in result and "nil" not in result:
+            log.info("set_request_timeout: %ds (%d ticks) — confirmed by mod",
+                     int(seconds), ticks)
             return True
+        log.warning(
+            "set_request_timeout: mod did not confirm (%s). It will use its own default; "
+            "if that is shorter than AI_TIMEOUT=%ds the mod can expire a request the "
+            "bridge is still waiting on, and the late reply is rejected as an unknown id.",
+            (result or "no response").strip(), int(seconds),
+        )
         return False
 
     def clear_memory(self) -> bool:
