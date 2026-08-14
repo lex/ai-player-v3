@@ -277,6 +277,47 @@ local function placement_problem(surface, item_name, position)
   return nil
 end
 
+-- Types that share a tile with a building legitimately and must not count as occupancy:
+-- ore under a drill, items on the ground, ghosts, corpses, and the builder itself.
+local NON_BLOCKING_TYPES = {
+  ["resource"] = true, ["item-entity"] = true, ["entity-ghost"] = true,
+  ["tile-ghost"] = true, ["corpse"] = true, ["character-corpse"] = true,
+  ["character"] = true, ["item-request-proxy"] = true, ["highlight-box"] = true,
+  ["flying-text"] = true, ["smoke"] = true, ["smoke-with-trigger"] = true,
+  ["particle-source"] = true, ["explosion"] = true, ["decorative"] = true,
+}
+
+-- Returns a description of whatever already stands where `item_name` would go, or nil.
+-- Uses the entity prototype's own collision box so the footprint matches what will
+-- actually be created, inset slightly so buildings that merely touch edges don't count.
+local function existing_occupant(surface, item_name, position, direction, character)
+  local item_proto = prototypes.item[item_name]
+  local ent_proto  = item_proto and item_proto.place_result
+  if not ent_proto then return nil end
+
+  local box = ent_proto.collision_box
+  if not box then return nil end
+  -- A 90/270 degree rotation swaps the box's axes.
+  local lx, ly = box.left_top.x, box.left_top.y
+  local rx, ry = box.right_bottom.x, box.right_bottom.y
+  if direction == defines.direction.east or direction == defines.direction.west then
+    lx, ly, rx, ry = ly, lx, ry, rx
+  end
+
+  local inset = 0.1
+  local area = {
+    {position.x + lx + inset, position.y + ly + inset},
+    {position.x + rx - inset, position.y + ry - inset},
+  }
+
+  for _, e in pairs(surface.find_entities_filtered{area = area}) do
+    if e.valid and e ~= character and not NON_BLOCKING_TYPES[e.type] then
+      return e.name
+    end
+  end
+  return nil
+end
+
 local function action_place(character, action)
   if not action.position then
     return false, "place: missing position"
@@ -311,6 +352,19 @@ local function action_place(character, action)
     return false, string.format(
       "place: '%s' cannot be legally placed at {%d,%d} (blocked, misaligned, or wrong tile)",
       item_name, px, py)
+  end
+
+  -- Explicit overlap guard. can_place_entity is not sufficient on its own: it answers
+  -- "could a player build here", which stays true where the game would fast-replace an
+  -- existing building, while create_entity below ignores collisions entirely and simply
+  -- stacks a second entity on the first. Observed in play as four burner-mining-drills
+  -- sharing one tile, each fuelled and mining, after build_miner ran four times on the
+  -- same patch. Refuse instead, and say what is already there so the caller can move on.
+  local occupant = existing_occupant(surface, item_name, action.position, dir, character)
+  if occupant then
+    return false, string.format(
+      "place: {%d,%d} is already occupied by %s — pick another spot",
+      px, py, occupant)
   end
 
   local entity = surface.create_entity{

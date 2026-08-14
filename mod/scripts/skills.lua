@@ -127,15 +127,43 @@ local function skill_build_miner(character, p)
     return false, "build_miner: no burner-mining-drill in inventory — crafting one, retry next turn"
   end
 
-  -- nearest patch of the resource
+  -- Nearest tile of the resource that no drill already covers. Without the occupancy
+  -- test every call picks the same nearest tile, so repeated build_miner turns pile
+  -- drills onto one spot instead of spreading across the patch.
+  local occupied = {}
+  for _, d in ipairs(surface.find_entities_filtered{type = "mining-drill",
+                                                    position = character.position, radius = 80}) do
+    local b = d.bounding_box
+    occupied[#occupied + 1] = b
+  end
+  local function covered(pos)
+    for _, b in ipairs(occupied) do
+      if pos.x >= b.left_top.x - 0.5 and pos.x <= b.right_bottom.x + 0.5
+         and pos.y >= b.left_top.y - 0.5 and pos.y <= b.right_bottom.y + 0.5 then
+        return true
+      end
+    end
+    return false
+  end
+
   local patch, pd = nil, math.huge
+  local skipped = 0
   for _, e in ipairs(surface.find_entities_filtered{name = resource, type = "resource",
                                                     position = character.position, radius = 64}) do
-    local dx, dy = e.position.x - character.position.x, e.position.y - character.position.y
-    local d = dx * dx + dy * dy
-    if d < pd then pd = d; patch = e end
+    if covered(e.position) then
+      skipped = skipped + 1
+    else
+      local dx, dy = e.position.x - character.position.x, e.position.y - character.position.y
+      local d = dx * dx + dy * dy
+      if d < pd then pd = d; patch = e end
+    end
   end
   if not patch then
+    if skipped > 0 then
+      return false, string.format(
+        "build_miner: every '%s' tile within 64 tiles is already under a drill (%d checked) " ..
+        "— explore for a new patch, or build something else", resource, skipped)
+    end
     return false, "build_miner: no '" .. resource .. "' patch within 64 tiles — gather/explore first"
   end
 
