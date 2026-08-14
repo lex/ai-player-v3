@@ -630,13 +630,36 @@ local function skill_research(character, p)
     end
   end
 
-  -- Nothing queueable: the next research is likely a TRIGGER tech (Factorio 2.0
-  -- bootstraps via crafting, not queuing). Tell the model to craft the science.
+  -- Nothing queueable. In Factorio 2.0 the early tree is unlocked by DOING things, not by
+  -- queuing them: a trigger technology fires when its item is crafted or its entity mined.
+  -- Report the exact trigger rather than a guessed recipe — the old message named a recipe
+  -- that does not even match this game, and told the model to hand-craft a plate, which is
+  -- impossible since plates are smelted.
+  local triggers = {}
   for _, t in pairs(force.technologies) do
-    if t.enabled and not t.researched and prereqs_met(t) and t.prototype.research_trigger ~= nil then
-      return false, "research: '" .. t.name .. "' is unlocked by CRAFTING, not queuing — hand-craft "
-        .. "automation-science-pack (1 copper-plate + 1 iron-gear-wheel) to trigger it; then more tech becomes queueable"
+    if t.enabled and not t.researched and prereqs_met(t) then
+      local rt = t.prototype.research_trigger
+      if rt then
+        local what
+        if rt.item then
+          what = "craft " .. (type(rt.item) == "table" and rt.item.name or tostring(rt.item))
+        elseif rt.entity then
+          what = "mine " .. (type(rt.entity) == "table" and rt.entity.name or tostring(rt.entity))
+        elseif rt.fluid then
+          what = "produce " .. (type(rt.fluid) == "table" and rt.fluid.name or tostring(rt.fluid))
+        else
+          what = tostring(rt.type)
+        end
+        triggers[#triggers + 1] = t.name .. " (" .. what .. ")"
+      end
     end
+  end
+
+  if #triggers > 0 then
+    return false, "research: there is NOTHING to queue — every available technology is a 2.0 " ..
+      "trigger tech, unlocked by doing the thing rather than by research. Do one of: " ..
+      table.concat(triggers, ", ", 1, math.min(#triggers, 4)) ..
+      ". Plates are made in a FURNACE, so build_smelter is usually the move; queuing cannot help here."
   end
   return false, "research: nothing to queue right now"
 end
@@ -757,9 +780,20 @@ local function skill_clear_area(character, p)
     -- what the inventory gained, the same way gather does.
     -- An ore tile also needs many swings to disappear, and a tile that is merely reduced is
     -- still unbuildable, so keep going until the entity is actually gone.
+    -- Stop before the inventory is packed. Clearing ore yields thousands of items, and a
+    -- full inventory silently breaks every later skill: mining stops yielding, crafting has
+    -- nowhere to put output, and placement fails for want of a slot. Leave headroom.
+    if inv.count_empty_stacks() <= 4 then
+      return true, string.format(
+        "cleared %d obstacle(s) (%d items) then STOPPED — inventory nearly full. " ..
+        "Deposit into a chest with {\"skill\":\"deposit_to_chest\"} before clearing more.",
+        cleared, mined_units)
+    end
+
     local finished = false
     for _ = 1, 400 do
       if not target.valid then finished = true break end
+      if inv.count_empty_stacks() <= 2 then break end
       local before = inv.get_item_count()
       character.mine_entity(target, true)
       if inv.get_item_count() == before then break end   -- inventory full, or unmineable

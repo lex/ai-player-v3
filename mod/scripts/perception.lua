@@ -537,15 +537,54 @@ function AIPerception.gather(character)
     pollution     = surface.get_pollution(pos),
   }
 
+  -- Free inventory slots. A full inventory breaks mining, crafting and building at once,
+  -- and does it silently — worth one number so the agent can see it coming.
+  local main_inv = character.get_inventory(defines.inventory.character_main)
+  perception.inventory_free_slots = main_inv and main_inv.count_empty_stacks() or 0
+
   -- Game phase (0–5)
   perception.game_phase = detect_game_phase(force)
 
   -- Research state — nothing progresses unless a tech is queued (use the
   -- research skill). current = nil means NO research is queued.
   local cur = force.current_research
+  -- queueable vs trigger matters more than it sounds. In Factorio 2.0 the early tree is
+  -- unlocked by DOING (craft this item, mine that entity), so early on there can be nothing
+  -- queueable at all — and telling the agent to "queue research" then sends it in a loop it
+  -- cannot escape. Report both, and name the cheapest trigger so the next step is obvious.
+  local queueable, trigger_name, trigger_do = 0, nil, nil
+  for _, t in pairs(force.technologies) do
+    if t.enabled and not t.researched then
+      local pre = true
+      for _, r in pairs(t.prerequisites) do
+        if not r.researched then pre = false break end
+      end
+      if pre then
+        local rt = t.prototype.research_trigger
+        if not rt then
+          queueable = queueable + 1
+        elseif not trigger_name then
+          trigger_name = t.name
+          if rt.item then
+            trigger_do = "craft:" .. (type(rt.item) == "table" and rt.item.name or tostring(rt.item))
+          elseif rt.entity then
+            trigger_do = "mine:" .. (type(rt.entity) == "table" and rt.entity.name or tostring(rt.entity))
+          elseif rt.fluid then
+            trigger_do = "produce:" .. (type(rt.fluid) == "table" and rt.fluid.name or tostring(rt.fluid))
+          else
+            trigger_do = tostring(rt.type)
+          end
+        end
+      end
+    end
+  end
+
   perception.research = {
-    current  = cur and cur.name or nil,
-    progress = cur and force.research_progress or 0,
+    current   = cur and cur.name or nil,
+    progress  = cur and force.research_progress or 0,
+    queueable = queueable,
+    trigger   = trigger_name,
+    trigger_do = trigger_do,
   }
 
   -- Whole-base machine view (scale-aware) + factory-wide maintenance needs.
