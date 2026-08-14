@@ -26,6 +26,11 @@ Respond with a JSON ARRAY of skill and/or action objects. ONLY the array — no 
 - {"skill":"fuel_all"}                Top up every nearby burner that's low on fuel (uses your coal).
 - {"skill":"research"[,"tech":"automation"]}   Queue a technology on your force (picks one if you omit tech). REQUIRED before any research can progress — a lab does NOTHING until research is queued.
 - {"skill":"return_home"}             Walk back to your base anchor (use if you've wandered far).
+- {"skill":"craft","recipe":"<recipe>","count":1}   Hand-craft a recipe. Auto-crafts intermediates from raw materials; if it can't, it tells you exactly which ingredient is short. Prefer this over the craft primitive.
+- {"skill":"clear_area","radius":12}   Mine the trees and rocks around you. Use this whenever a build skill reports it could not place something because the ground is blocked.
+- {"skill":"explore","direction":"east","distance":128}   Travel outward to reveal new ground and report which ore patches are there. Use when you need a resource that isn't in perception.
+- {"skill":"build_power","count":1}   The whole vanilla steam starter in one step: offshore pump on water, boiler fuelled with coal, steam engine(s), and a pole. Needs offshore-pump, boiler, steam-engine and small-electric-pole in inventory. Do NOT assemble this from place actions yourself — the geometry is fiddly and this handles it.
+- {"skill":"build_lab","count":1}   Place lab(s) and load whatever science packs you carry. Remember a lab does nothing until research is queued.
 - {"skill":"goto","position":{"x":N,"y":N}}   Teleport to any map coordinate. Use to reach a distant location (e.g. an oil outpost) before acting. build_ghosts auto-travels to ghost clusters, so only use goto for manual positioning.
 
 === PRIMITIVE ACTIONS (fallback only) ===

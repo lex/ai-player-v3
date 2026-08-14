@@ -534,6 +534,269 @@ local function skill_goto(character, p)
 end
 
 -- -------------------------------------------------------------------------
+-- craft(recipe, count) — hand-craft, reporting what is actually missing.
+-- The craft primitive queues and returns; this checks feasibility first so a
+-- failure says which ingredient is short instead of silently queueing nothing.
+-- Factorio hand-crafting auto-queues intermediates, so get_craftable_count is
+-- the honest measure of what can be made from the raw items on hand.
+-- -------------------------------------------------------------------------
+local function skill_craft(character, p)
+  local recipe_name = p.recipe or p.item
+  if not recipe_name then return false, "craft: missing 'recipe'" end
+  local want = math.max(1, math.min(tonumber(p.count) or 1, 100))
+
+  local recipe = prototypes.recipe[recipe_name]
+  if not recipe then return false, "craft: no such recipe '" .. recipe_name .. "'" end
+
+  local craftable = character.force.get_craftable_count and
+                    character.force.get_craftable_count(recipe_name) or nil
+  if craftable == nil then
+    -- Older/other API shape: fall back to asking the character directly.
+    craftable = character.get_craftable_count(recipe_name)
+  end
+  if craftable == 0 then
+    local inv = inv_of(character)
+    local missing = {}
+    for _, ing in pairs(recipe.ingredients) do
+      if ing.type == "item" then
+        local have = inv.get_item_count(ing.name)
+        if have < ing.amount then
+          missing[#missing + 1] = string.format("%s %d/%d", ing.name, have, ing.amount)
+        end
+      end
+    end
+    return false, "craft: cannot craft " .. recipe_name ..
+      (#missing > 0 and (" — short: " .. table.concat(missing, ", ")) or
+       " — needs a machine, not hand-craftable")
+  end
+
+  local queued = character.begin_crafting{recipe = recipe_name, count = math.min(want, craftable)}
+  if queued == 0 then
+    return false, "craft: " .. recipe_name .. " could not be queued"
+  end
+  return true, string.format("crafting %d x %s%s", queued, recipe_name,
+    queued < want and (" (wanted " .. want .. ", materials for " .. craftable .. ")") or "")
+end
+
+-- -------------------------------------------------------------------------
+-- clear_area(radius) — mine trees and rocks around the character to make room.
+-- Placement fails on blocked tiles, so this is the fix when a build skill keeps
+-- reporting it cannot place anything.
+-- -------------------------------------------------------------------------
+local function skill_clear_area(character, p)
+  local radius = math.max(4, math.min(tonumber(p.radius) or 12, 32))
+  local surface = character.surface
+  local inv = inv_of(character)
+  local cleared = 0
+
+  for _ = 1, 120 do
+    local blockers = surface.find_entities_filtered{
+      position = character.position, radius = radius,
+      type = {"tree", "simple-entity"}, limit = 40,
+    }
+    local target, td = nil, math.huge
+    for _, e in ipairs(blockers) do
+      if e.valid and e.minable then
+        local dx, dy = e.position.x - character.position.x, e.position.y - character.position.y
+        local d = dx * dx + dy * dy
+        if d < td then td = d; target = e end
+      end
+    end
+    if not target then break end
+    local sp = surface.find_non_colliding_position("character", target.position, 3, 0.5)
+    if sp then character.teleport(sp) end
+    local before = inv.get_item_count()
+    if not character.mine_entity(target, true) then break end
+    if inv.get_item_count() == before then
+      -- Mined but gained nothing: inventory is full, so stop rather than spin.
+      cleared = cleared + 1
+      break
+    end
+    cleared = cleared + 1
+  end
+
+  if cleared == 0 then
+    return true, string.format("clear_area: nothing to clear within %d tiles", radius)
+  end
+  return true, string.format("cleared %d obstacle(s) within %d tiles", cleared, radius)
+end
+
+-- -------------------------------------------------------------------------
+-- explore(direction, distance) — teleport outward in steps, letting chunks
+-- generate, to find resources that are not in perception yet. Reports what ore
+-- patches turned up so the next turn can act on them.
+-- -------------------------------------------------------------------------
+local DIR_VECTORS = {
+  north = {0, -1}, south = {0, 1}, east = {1, 0}, west = {-1, 0},
+  northeast = {1, -1}, northwest = {-1, -1}, southeast = {1, 1}, southwest = {-1, 1},
+}
+
+local function skill_explore(character, p)
+  local dir = tostring(p.direction or "east"):lower()
+  local vec = DIR_VECTORS[dir]
+  if not vec then
+    return false, "explore: direction must be one of north/south/east/west/northeast/…"
+  end
+  local distance = math.max(32, math.min(tonumber(p.distance) or 128, 512))
+  local surface = character.surface
+  local start = character.position
+  local target = {x = start.x + vec[1] * distance, y = start.y + vec[2] * distance}
+
+  surface.request_to_generate_chunks(target, 2)
+  surface.force_generate_chunk_requests()
+
+  local safe = surface.find_non_colliding_position("character", target, 16, 0.5)
+  if not safe then
+    return false, string.format("explore: nowhere to stand %d tiles %s (water or cliffs?)",
+                                distance, dir)
+  end
+  character.teleport(safe)
+
+  local found = {}
+  for _, res in ipairs(surface.find_entities_filtered{
+    position = safe, radius = 64, type = "resource", limit = 200,
+  }) do
+    found[res.name] = (found[res.name] or 0) + 1
+  end
+  local parts = {}
+  for name, n in pairs(found) do parts[#parts + 1] = name .. " x" .. n end
+
+  return true, string.format("explored %d tiles %s to {%d,%d}; %s",
+    distance, dir, safe.x, safe.y,
+    #parts > 0 and ("found " .. table.concat(parts, ", ")) or "no resources in sight")
+end
+
+-- -------------------------------------------------------------------------
+-- build_power() — the vanilla steam starter: offshore pump on water, boiler
+-- fed with coal, steam engine, and a pole to carry the output.
+--
+-- The model repeatedly tried to assemble this from primitives and failed on the
+-- geometry: the three buildings must sit in a line along the pump's facing, and
+-- an offshore pump only places on a water tile that has land behind it. Doing it
+-- here means the model asks for "power" and the mechanics are fixed and testable.
+-- -------------------------------------------------------------------------
+local WATER_TILES = {"water", "deepwater", "water-green", "deepwater-green",
+                     "water-shallow", "water-mud"}
+
+local function skill_build_power(character, p)
+  local surface = character.surface
+  local inv = inv_of(character)
+  local engines = math.max(1, math.min(tonumber(p.count) or 1, 4))
+
+  local needs = {
+    ["offshore-pump"] = 1, ["boiler"] = 1,
+    ["steam-engine"] = engines, ["small-electric-pole"] = 1,
+  }
+  local short = {}
+  for item, n in pairs(needs) do
+    local have = inv.get_item_count(item)
+    if have < n then short[#short + 1] = string.format("%s %d/%d", item, have, n) end
+  end
+  if #short > 0 then
+    return false, "build_power: missing " .. table.concat(short, ", ") ..
+                  " — craft or gather those first"
+  end
+
+  local water = surface.find_tiles_filtered{
+    position = character.position, radius = 48, name = WATER_TILES, limit = 400,
+  }
+  if #water == 0 then
+    return false, "build_power: no water within 48 tiles — explore for a lake first"
+  end
+
+  -- A pump needs land behind it: try each shore tile, facing away from the water.
+  for _, tile in ipairs(water) do
+    local tp = tile.position
+    for dir_name, v in pairs({north = {0, -1}, south = {0, 1}, east = {1, 0}, west = {-1, 0}}) do
+      local behind = surface.get_tile(tp.x + v[1], tp.y + v[2])
+      if behind and not behind.collides_with("water_tile") then
+        local placed = AIActions.run(character, {
+          action = "place", item = "offshore-pump",
+          position = {x = tp.x + 0.5, y = tp.y + 0.5}, direction = dir_name,
+        })
+        if placed then
+          local built = {"pump"}
+          -- Boiler and engines march inland along the pump's facing.
+          local bx, by = tp.x + v[1] * 3, tp.y + v[2] * 3
+          local boiler_ok = AIActions.run(character, {
+            action = "place", item = "boiler",
+            position = {x = bx + 0.5, y = by + 0.5}, direction = dir_name,
+          })
+          if boiler_ok then
+            built[#built + 1] = "boiler"
+            AIActions.run(character, {action = "insert", item = "coal", count = 20,
+                                      position = {x = bx + 0.5, y = by + 0.5}})
+            local n = 0
+            for i = 1, engines do
+              local ex, ey = bx + v[1] * (3 + i * 3), by + v[2] * (3 + i * 3)
+              if AIActions.run(character, {action = "place", item = "steam-engine",
+                                           position = {x = ex + 0.5, y = ey + 0.5},
+                                           direction = dir_name}) then
+                n = n + 1
+                AIActions.run(character, {action = "place", item = "small-electric-pole",
+                                          position = {x = ex + 2.5, y = ey + 0.5}})
+              end
+            end
+            if n > 0 then
+              built[#built + 1] = n .. " steam-engine"
+              return true, "build_power: placed " .. table.concat(built, " + ") ..
+                           ", boiler fuelled with coal"
+            end
+            return false, "build_power: pump and boiler placed, but no room for a steam " ..
+                          "engine inland — clear_area then retry"
+          end
+          return false, "build_power: pump placed, but the boiler spot 3 tiles inland is " ..
+                        "blocked — clear_area then retry"
+        end
+      end
+    end
+  end
+  return false, "build_power: found water but no shore tile with land behind it to place " ..
+                "the pump — try another lake"
+end
+
+-- -------------------------------------------------------------------------
+-- build_lab(count) — place labs near home and load whatever science is on hand.
+-- A lab still does nothing until research is queued, so this reminds the caller.
+-- -------------------------------------------------------------------------
+local SCIENCE_PACKS = {"automation-science-pack", "logistic-science-pack",
+                       "military-science-pack", "chemical-science-pack"}
+
+local function skill_build_lab(character, p)
+  local inv = inv_of(character)
+  local want = math.max(1, math.min(tonumber(p.count) or 1, 4))
+  local have = inv.get_item_count("lab")
+  if have == 0 then
+    return false, "build_lab: no lab in inventory — craft one first " ..
+                  "(10 iron-gear-wheel, 10 electronic-circuit, 4 transport-belt)"
+  end
+
+  local surface = character.surface
+  local placed = 0
+  for i = 1, math.min(want, have) do
+    local spot = surface.find_non_colliding_position("lab",
+      {x = character.position.x + i * 4, y = character.position.y + 4}, 12, 1)
+    if spot and AIActions.run(character, {action = "place", item = "lab", position = spot}) then
+      placed = placed + 1
+      for _, pack in ipairs(SCIENCE_PACKS) do
+        if inv.get_item_count(pack) > 0 then
+          AIActions.run(character, {action = "insert", item = pack,
+                                    count = math.min(inv.get_item_count(pack), 10),
+                                    position = spot})
+        end
+      end
+    end
+  end
+
+  if placed == 0 then
+    return false, "build_lab: no free space for a lab nearby — clear_area then retry"
+  end
+  local queued = character.force.current_research ~= nil
+  return true, string.format("placed %d lab(s) and loaded available science%s", placed,
+    queued and "" or " — nothing is being researched, queue it with the research skill")
+end
+
+-- -------------------------------------------------------------------------
 -- Registry + required params (mirrored in the bridge router prompt/validation)
 -- -------------------------------------------------------------------------
 AISkills.REGISTRY = {
@@ -548,6 +811,11 @@ AISkills.REGISTRY = {
   return_home      = skill_return_home,
   research         = skill_research,
   ["goto"]         = skill_goto,
+  craft            = skill_craft,
+  clear_area       = skill_clear_area,
+  explore          = skill_explore,
+  build_power      = skill_build_power,
+  build_lab        = skill_build_lab,
 }
 
 -- -------------------------------------------------------------------------

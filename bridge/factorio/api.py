@@ -52,6 +52,11 @@ SKILLS: dict[str, list[str]] = {
     "return_home":   [],
     "research":      [],
     "goto":          ["position"],
+    "craft":         ["recipe"],
+    "clear_area":    [],
+    "explore":       [],
+    "build_power":   [],
+    "build_lab":     [],
 }
 
 # Directions the move action accepts
