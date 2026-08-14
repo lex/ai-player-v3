@@ -24,6 +24,8 @@ Respond with a JSON ARRAY of skill and/or action objects. ONLY the array — no 
 - {"skill":"build_miner","resource":"iron-ore","output":"chest"}   Place a burner-mining-drill ON the nearest patch of resource, fuel it, and put a collector (output = chest | furnace | belt) at its drop position. Use this to AUTOMATE mining (iron-ore, copper-ore, coal, stone). Needs a burner-mining-drill in inventory.
 - {"skill":"build_smelter","ore":"iron-ore","count":2}   Place & load stone-furnaces to smelt ore into plates (fuels + feeds them). Needs the ore in inventory first (gather it).
 - {"skill":"fuel_all"}                Top up every nearby burner that's low on fuel (uses your coal).
+- {"skill":"deposit_to_chest"[,"keep":50]}   Empty your inventory into nearby chests, keeping `keep` of each item. Use this the moment your inventory is full — a full inventory silently breaks mining, crafting and building.
+- {"skill":"loot_chests"}             Take the contents of nearby chests into your inventory.
 - {"skill":"research"[,"tech":"automation"]}   Queue a technology on your force (picks one if you omit tech). REQUIRED before any research can progress — a lab does NOTHING until research is queued.
 - {"skill":"return_home"}             Walk back to your base anchor (use if you've wandered far).
 - {"skill":"craft","recipe":"<recipe>","count":1}   Hand-craft a recipe. Auto-crafts intermediates from raw materials; if it can't, it tells you exactly which ingredient is short. Prefer this over the craft primitive.
@@ -62,9 +64,35 @@ RECIPES you need early (this game's actual numbers):
   transport-belt         = 1 iron-gear-wheel + 1 iron-plate (makes 2)
 A lab consumes science packs only while a technology is queued — an unqueued lab is inert.
 
+RESEARCH IN 2.0 — the early tree is unlocked by DOING, not by queuing. A "trigger" technology
+fires when you craft its item or mine its entity (e.g. electronics unlocks by crafting a
+copper-plate, steam-power by crafting an iron-plate). perception.research.queueable tells you
+how many technologies can actually be queued: when it is 0, {"skill":"research"} CANNOT help
+however many times you try, and research.trigger_do names what to do instead. Plates come out
+of a FURNACE, so the answer is usually gather the ore and build_smelter.
+
 DRILL OUTPUT — a mining drill drops its ore on ONE tile, the drop position, which depends
 on the direction it faces. Aim it at a chest, a furnace or a belt. A drill facing empty
 ground piles ore on the floor and the mine is useless.
+
+=== EARLY GAME BUILD ORDER (follow this; it is the standard opening) ===
+1. COAL FIRST. Place two burner drills FACING EACH OTHER on coal — each drops coal into the
+   other's fuel slot, so the pair runs forever with no hand-feeding. Coal powers every burner
+   machine you own, so this pays for itself immediately.
+2. IRON. Place a burner drill on iron with a stone furnace at its drop position, so the drill
+   feeds the furnace directly: {"skill":"build_miner","resource":"iron-ore","output":"furnace"}.
+   That single pair is the whole early mine-and-smelt loop.
+3. COPPER. The same drill+furnace pair on copper ore.
+4. MORE IRON. You need roughly TWICE as many iron drills as copper — iron goes into almost
+   everything. Keep adding pairs; do not stop at one.
+5. STONE. A drill on stone with a chest, when you need stone for furnaces.
+6. HAND-CRAFT the first science and trigger the early techs (see RESEARCH IN 2.0 below).
+7. POWER, once you own something electric that is starved: one offshore pump, one boiler,
+   two steam engines — {"skill":"build_power"} does the whole thing. The pump itself needs
+   no power.
+8. AUTOMATE. Replace burner drills with electric ones, and build assemblers, only after
+   power exists.
+Do not jump ahead. Power before mining, or labs before smelting, wastes the whole turn.
 
 === THIS MAP: DANGER ORES ===
 The ground itself is ore, and that changes the rules:
@@ -166,18 +194,54 @@ def next_objective(perception: dict) -> tuple[dict | None, str | None, str | Non
     def placed(*names: str) -> int:
         return sum(int(built.get(n, 0) or 0) for n in names)
 
+    machines = perception.get("factory", {}).get("machines") or []
+
+    def placed_on(resource: str) -> int:
+        """Drills currently mining `resource`. by_type only counts entity names, and the
+        difference between a coal drill and an iron drill is the whole early game."""
+        n = 0
+        for m in machines:
+            if "drill" in str(m.get("name", "")) and resource in str(m.get("mining") or m.get("resource") or ""):
+                n += 1
+        return n
+
     drills = placed("burner-mining-drill", "electric-mining-drill")
     furnaces = placed("stone-furnace", "steel-furnace", "electric-furnace")
     labs = placed("lab")
 
-    # 1. Ore in the ground is worth nothing: get automated mining running first.
-    if drills == 0 and have("burner-mining-drill") > 0:
+    # 0. A full inventory breaks everything downstream — mining stops yielding, crafting has
+    #    nowhere to put output, placement fails for want of a slot — and it does so silently,
+    #    so it looks like the other skills are broken. Clear it before anything else.
+    free = perception.get("inventory_free_slots")
+    if free is not None and int(free) <= 4:
         return (
-            {"skill": "build_miner", "resource": "iron-ore", "output": "chest"},
-            "Setting up a mine — nothing is being mined automatically yet.",
-            'place a mine with {"skill":"build_miner","resource":"iron-ore","output":"chest"}. '
-            'You have a burner-mining-drill in your inventory and nothing is being mined '
-            'automatically. A burner drill needs NO electricity — do not build power for it.',
+            {"skill": "deposit_to_chest"},
+            "Inventory is full — dumping into a chest before doing anything else.",
+            'your inventory is FULL, which silently breaks mining, crafting and building. '
+            'Empty it with {"skill":"deposit_to_chest"} before anything else. If there is no '
+            'chest, craft and place one on cleared ground first.',
+        )
+
+    # 1. COAL first. Everything in the burner age eats coal — the drills, the furnaces, the
+    #    inserters — and a coal drill feeds the rest of the base, including itself. Mining
+    #    iron first just means hand-feeding coal to the machine that mines it.
+    if placed_on("coal") == 0 and have("burner-mining-drill") > 0:
+        return (
+            {"skill": "build_miner", "resource": "coal", "output": "chest"},
+            "Mining coal first — every burner machine runs on it, including the drills.",
+            'put a drill on COAL first: {"skill":"build_miner","resource":"coal","output":"chest"}. '
+            'Coal fuels every burner machine you own, so a coal mine feeds the rest of the base '
+            'and itself. Iron can wait one turn.',
+        )
+
+    # 2. Then iron, in quantity — it is what everything is made of.
+    if drills < 2 and have("burner-mining-drill") > 0:
+        return (
+            {"skill": "build_miner", "resource": "iron-ore", "output": "furnace"},
+            "Adding an iron mine feeding a furnace — the standard opening pair.",
+            'now mine iron, feeding a furnace directly: '
+            '{"skill":"build_miner","resource":"iron-ore","output":"furnace"}. That drill+furnace '
+            'pair is the whole early loop. A burner drill needs NO electricity.',
         )
 
     # 2. Ore is useless without plates, and a stone furnace also needs no power.
@@ -198,14 +262,38 @@ def next_objective(perception: dict) -> tuple[dict | None, str | None, str | Non
             'gather ore to feed your furnaces: {"skill":"gather","item":"iron-ore","count":60}.',
         )
 
-    # 4. A lab does nothing until something is queued, and queuing costs nothing.
-    if not research.get("current") and (labs > 0 or have("automation-science-pack") > 0):
-        return (
-            {"skill": "research"},
-            "Queuing research — I have lab capacity but nothing is being researched.",
-            'queue a technology with {"skill":"research"} — you have lab capacity but nothing '
-            'is being researched, so no progress is being made.',
-        )
+    # 4. Research. Two very different cases, and confusing them wastes every turn:
+    #    a queueable tech just needs queuing, but a 2.0 TRIGGER tech is unlocked by doing
+    #    the thing — and early on there may be nothing queueable at all.
+    if not research.get("current"):
+        queueable = int(research.get("queueable", 0) or 0)
+        trigger_do = research.get("trigger_do") or ""
+        if queueable > 0 and (labs > 0 or have("automation-science-pack") > 0):
+            return (
+                {"skill": "research"},
+                "Queuing research — I have lab capacity but nothing is being researched.",
+                'queue a technology with {"skill":"research"} — you have lab capacity but '
+                'nothing is being researched, so no progress is being made.',
+            )
+        if trigger_do.startswith("craft:"):
+            item = trigger_do.split(":", 1)[1]
+            ore = {"copper-plate": "copper-ore", "iron-plate": "iron-ore"}.get(item)
+            if ore:
+                if have(ore) == 0:
+                    return (
+                        {"skill": "gather", "item": ore, "count": 50},
+                        f"Mining {ore} — smelting it is what unlocks the next technology.",
+                        f'mine {ore} with {{"skill":"gather","item":"{ore}","count":50}}. Nothing '
+                        f'is queueable: the next technology ({research.get("trigger")}) unlocks by '
+                        f'CRAFTING {item}, and {item} is made by smelting {ore} in a furnace.',
+                    )
+                return (
+                    {"skill": "build_smelter", "ore": ore, "count": 2},
+                    f"Smelting {ore} — that unlocks the next technology.",
+                    f'smelt it with {{"skill":"build_smelter","ore":"{ore}","count":2}}. Nothing is '
+                    f'queueable: {research.get("trigger")} unlocks by CRAFTING {item}, which means '
+                    f'producing it in a furnace. Queuing research cannot help.',
+                )
 
     # 5. Only now is power worth building, and only if something actually wants it.
     if labs > 0 and not power.get("has_grid") and int(power.get("machines_no_power", 0) or 0) > 0:
@@ -228,7 +316,7 @@ def objective_text(perception: dict) -> str | None:
             "before anything else, and ignore longer-term goals until it is done): " + text)
 
 
-def build_messages(payload: dict, system_prefix: str = "") -> list[dict]:
+def build_messages(payload: dict, system_prefix: str = "", goal_note: str | None = None) -> list[dict]:
     system = SYSTEM_PROMPT
     if system_prefix:
         system = system_prefix.strip() + "\n\n" + system
@@ -255,6 +343,9 @@ def build_messages(payload: dict, system_prefix: str = "") -> list[dict]:
         parts.append("Notes: " + " | ".join(notes))
     if mem.get("user_directive"):
         parts.append("Player directive (keep following): " + str(mem["user_directive"]))
+
+    if goal_note:
+        parts.append(goal_note)
 
     user_message = payload.get("user_message")
     if user_message:

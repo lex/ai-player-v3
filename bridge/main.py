@@ -109,6 +109,35 @@ def main() -> None:
         # Push the derived request timeout to the mod (single source = AI_TIMEOUT).
         rcon.set_request_timeout(derived_timeout)
 
+        # The skill set is written down three times — the mod's REGISTRY, api.SKILLS here,
+        # and the prompt catalogue — and nothing keeps them in step. Drift is silent and
+        # asymmetric: a skill only the mod has is unreachable, while one only the bridge
+        # advertises gets offered to the model and fails every time it is picked. Ask the
+        # mod what it really implements and say so at startup, where it will be noticed.
+        mod_skills = rcon.list_skills()
+        if mod_skills:
+            from .factorio.api import SKILLS
+            from .prompt import SYSTEM_PROMPT
+            mod_set, bridge_set = set(mod_skills), set(SKILLS)
+            missing = sorted(mod_set - bridge_set)
+            extra = sorted(bridge_set - mod_set)
+            unlisted = sorted(n for n in mod_set & bridge_set
+                              if f'"skill":"{n}"' not in SYSTEM_PROMPT)
+            if missing:
+                log.warning("Skills the mod has but this bridge cannot route: %s "
+                            "— add them to api.SKILLS", ", ".join(missing))
+            if extra:
+                log.error("Skills this bridge offers that the mod does NOT implement: %s "
+                          "— the model will pick them and every attempt will fail",
+                          ", ".join(extra))
+            if unlisted:
+                log.warning("Skills valid on both sides but absent from the prompt catalogue: "
+                            "%s — the model will never know they exist", ", ".join(unlisted))
+            if not (missing or extra or unlisted):
+                log.info("Skill set matches the mod (%d skills)", len(mod_set))
+        else:
+            log.warning("Could not read the mod's skill list — skipping the drift check")
+
     log.info("Bridge running. Waiting for requests... (Ctrl+C to stop)")
 
     # ---------------------------------------------------------------------------

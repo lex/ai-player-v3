@@ -14,6 +14,7 @@ from .config import BridgeConfig
 from .factorio.api import parse_response
 from .factorio.watcher import PendingRequest
 from .metrics import STATUS_OK, STATUS_PARSE_ERROR, STATUS_TIMEOUT, record_exchange
+from .goals import GoalTracker
 from .prompt import build_messages, next_objective
 from .providers import get_provider
 from .transcript import log_exchange
@@ -72,6 +73,10 @@ def _fallback(reason: str) -> list[dict]:
 
 
 class Agent:
+    def __init__(self):
+        # Long-lived with the bridge process, so goals persist across turns.
+        self.goals = GoalTracker()
+
     def decide(self, req: PendingRequest, config: BridgeConfig) -> list[dict]:
         provider_cfg = config.to_provider_config()
         complete = get_provider(provider_cfg)
@@ -84,15 +89,25 @@ class Agent:
         # Deterministic fast path: during the bootstrap the next move is a fact about
         # Factorio, not a judgement call, so answer it directly instead of paying a
         # model round trip to be told what we already computed.
+        perception = payload["perception"]
+        memory = perception.get("memory") or {}
+        objective_entry, _, _ = next_objective(perception)
+        self.goals.observe(objective_entry, memory.get("last_action_results"))
+
         why_model = _model_needed(payload)
+        # A stuck goal is exactly the case the ladder cannot fix by repeating itself, so
+        # hand it to the model even though the situation looks unambiguous.
+        if why_model is None and self.goals.stuck:
+            why_model = "the current goal has failed repeatedly"
+
         if why_model is None:
-            entry, chat_line, _ = next_objective(payload["perception"])
+            entry, chat_line, _ = next_objective(perception)
             if entry:
                 log.info("Request %s: answered from the objective ladder, no model call (%s)",
                          req.req_id, entry.get("skill"))
                 return [{"action": "chat", "message": chat_line}, entry]
 
-        messages = build_messages(payload, config.system_prefix)
+        messages = build_messages(payload, config.system_prefix, self.goals.note())
 
         log.info("Routing request %s via %s (model=%s)",
                  req.req_id, provider_cfg.provider, provider_cfg.model)
