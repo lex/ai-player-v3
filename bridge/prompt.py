@@ -173,6 +173,61 @@ def _failed_detail(results, name: str) -> str | None:
     return None
 
 
+# Fields that are large and rarely decisive. The whole-base view already arrives
+# summarised (factory.summary/by_type/attention); the full per-machine roster and a long
+# list of scenery are detail the model does not act on.
+_TRIM_LISTS = {
+    "nearby_entities": 8,
+    "nearby_resources": 4,
+    "inventory": 20,
+    "enemies": 3,
+    "nearby_water": 2,
+}
+
+
+def _trim_perception(perception: dict) -> dict:
+    """
+    Shrink the per-turn payload.
+
+    Latency here is dominated by PREFILL, not generation: the server log showed ~6000
+    tokens re-prefilled in 20.3s to produce an 8-token reply, missing the KV cache every
+    turn because this half of the prompt changes. The system prompt is stable and stays
+    cached, so the only lever is making the changing half smaller.
+
+    Pretty-printing cost about a third of it on its own — indentation and newlines
+    tokenise badly — and factory.machines plus a 25-entry scenery list accounted for most
+    of the rest.
+    """
+    trimmed = dict(perception)
+
+    for key, limit in _TRIM_LISTS.items():
+        value = trimmed.get(key)
+        if isinstance(value, list) and len(value) > limit:
+            trimmed[key] = value[:limit]
+
+    factory = trimmed.get("factory")
+    if isinstance(factory, dict):
+        factory = dict(factory)
+        machines = factory.get("machines")
+        # The per-machine roster is only useful while the base is tiny; past that the
+        # summary and the attention list say the same thing in a fraction of the space.
+        if isinstance(machines, list) and len(machines) > 6:
+            factory.pop("machines", None)
+        attention = factory.get("attention")
+        if isinstance(attention, list) and len(attention) > 6:
+            factory["attention"] = attention[:6]
+        trimmed["factory"] = factory
+
+    needs = trimmed.get("needs")
+    if isinstance(needs, dict):
+        # needs is routing information: how many machines want each thing, not which.
+        trimmed["needs"] = {
+            k: (len(v) if isinstance(v, list) else v) for k, v in needs.items()
+        }
+
+    return trimmed
+
+
 def next_objective(perception: dict) -> tuple[dict | None, str | None, str | None]:
     """
     The one thing that most needs doing, computed from perception rather than left to
@@ -419,7 +474,8 @@ def build_messages(payload: dict, system_prefix: str = "", goal_note: str | None
     parts: list[str] = []
     perception = payload.get("perception") or {}
     if perception:
-        parts.append("Game state:\n" + json.dumps(perception, indent=1))
+        parts.append("Game state:\n" + json.dumps(_trim_perception(perception),
+                                                   separators=(",", ":")))
         phase = perception.get("game_phase")
         if phase in PHASE_HINT:
             parts.append(PHASE_HINT[phase])
