@@ -250,10 +250,13 @@ class ConfigLoader:
             cfg.provider = str(raw.get("provider", cfg.provider)).lower()
         if "AI_MODEL" not in self._env:
             cfg.model = raw.get("model_name", cfg.model)
-        cfg.lm_studio_url   = raw.get("lm_studio_url", cfg.lm_studio_url)
+        # Blank strings are the mod's defaults for the fields it has no setting for yet,
+        # so an unset in-game setting must not clobber a value that came from .env --
+        # take the mod's value only when it actually holds one.
+        cfg.lm_studio_url   = raw.get("lm_studio_url") or cfg.lm_studio_url
         cfg.openai_api_key  = raw.get("openai_api_key") or cfg.openai_api_key
-        cfg.openai_api_base = raw.get("openai_api_base", cfg.openai_api_base)
-        cfg.custom_url      = raw.get("custom_url", cfg.custom_url)
+        cfg.openai_api_base = raw.get("openai_api_base") or cfg.openai_api_base
+        cfg.custom_url      = raw.get("custom_url") or cfg.custom_url
 
         rcon_host = raw.get("rcon_host", "")
         rcon_port = raw.get("rcon_port")
