@@ -86,7 +86,7 @@ def _failed_detail(results, name: str) -> str | None:
     return None
 
 
-def _next_objective(perception: dict) -> str | None:
+def next_objective(perception: dict) -> tuple[dict | None, str | None, str | None]:
     """
     The one thing that most needs doing, computed from perception rather than left to
     the model's judgement.
@@ -97,9 +97,13 @@ def _next_objective(perception: dict) -> str | None:
     smelting. Nothing in a burner-age base even needs electricity: burner drills and
     stone furnaces run on coal, and only the lab draws power.
 
-    So walk an explicit ladder, cheapest prerequisite first, and hand the model the
-    single next step. Returns None once the base is past the bootstrap, leaving the
-    model free to plan.
+    Returns (skill_entry, chat_line, prompt_text):
+      skill_entry — the concrete skill to run, so an unambiguous turn can be executed
+                    without asking a model to agree with arithmetic
+      chat_line   — what to say in game when doing that
+      prompt_text — the same instruction phrased for the model, when we do ask it
+    All three are None once the base is past the bootstrap, leaving planning to the
+    model where planning is genuinely required.
     """
     inv = {i.get("name"): i.get("count", 0) for i in (perception.get("inventory") or [])}
     built = perception.get("factory", {}).get("by_type") or {}
@@ -116,41 +120,62 @@ def _next_objective(perception: dict) -> str | None:
     furnaces = placed("stone-furnace", "steel-furnace", "electric-furnace")
     labs = placed("lab")
 
-    def step(text: str) -> str:
-        return ("NEXT OBJECTIVE (this is the most useful thing you can do right now — "
-                "do it before anything else, and ignore longer-term goals until it is "
-                f"done): {text}")
-
     # 1. Ore in the ground is worth nothing: get automated mining running first.
     if drills == 0 and have("burner-mining-drill") > 0:
-        return step('place a mine with {"skill":"build_miner","resource":"iron-ore",'
-                    '"output":"chest"}. You have a burner-mining-drill in your inventory '
-                    'and nothing is being mined automatically. A burner drill needs NO '
-                    'electricity — do not build power for it.')
+        return (
+            {"skill": "build_miner", "resource": "iron-ore", "output": "chest"},
+            "Setting up a mine — nothing is being mined automatically yet.",
+            'place a mine with {"skill":"build_miner","resource":"iron-ore","output":"chest"}. '
+            'You have a burner-mining-drill in your inventory and nothing is being mined '
+            'automatically. A burner drill needs NO electricity — do not build power for it.',
+        )
 
     # 2. Ore is useless without plates, and a stone furnace also needs no power.
     if furnaces == 0 and (have("iron-ore") > 0 or have("copper-ore") > 0):
         ore = "iron-ore" if have("iron-ore") >= have("copper-ore") else "copper-ore"
-        return step(f'smelt what you have with {{"skill":"build_smelter","ore":"{ore}",'
-                    '"count":2}. A stone furnace burns coal and needs NO electricity.')
+        return (
+            {"skill": "build_smelter", "ore": ore, "count": 2},
+            f"Smelting the {ore} I have — no furnaces running yet.",
+            f'smelt what you have with {{"skill":"build_smelter","ore":"{ore}","count":2}}. '
+            'A stone furnace burns coal and needs NO electricity.',
+        )
 
     # 3. Keep the furnaces fed rather than idling.
     if furnaces > 0 and have("iron-ore") == 0 and have("iron-plate") < 30:
-        return step('gather ore to feed your furnaces: '
-                    '{"skill":"gather","item":"iron-ore","count":60}.')
+        return (
+            {"skill": "gather", "item": "iron-ore", "count": 60},
+            "Gathering iron ore — the furnaces have nothing to smelt.",
+            'gather ore to feed your furnaces: {"skill":"gather","item":"iron-ore","count":60}.',
+        )
 
     # 4. A lab does nothing until something is queued, and queuing costs nothing.
     if not research.get("current") and (labs > 0 or have("automation-science-pack") > 0):
-        return step('queue a technology with {"skill":"research"} — you have lab capacity '
-                    'but nothing is being researched, so no progress is being made.')
+        return (
+            {"skill": "research"},
+            "Queuing research — I have lab capacity but nothing is being researched.",
+            'queue a technology with {"skill":"research"} — you have lab capacity but nothing '
+            'is being researched, so no progress is being made.',
+        )
 
     # 5. Only now is power worth building, and only if something actually wants it.
     if labs > 0 and not power.get("has_grid") and int(power.get("machines_no_power", 0) or 0) > 0:
-        return step('build electricity with {"skill":"build_power","count":1} — you have '
-                    'machines that need power and no grid. This is the FIRST point at '
-                    'which power is worth building.')
+        return (
+            {"skill": "build_power", "count": 1},
+            "Building steam power — machines are waiting on electricity.",
+            'build electricity with {"skill":"build_power","count":1} — you have machines that '
+            'need power and no grid. This is the FIRST point at which power is worth building.',
+        )
 
-    return None
+    return (None, None, None)
+
+
+def objective_text(perception: dict) -> str | None:
+    """The ladder's instruction phrased for the model, or None."""
+    _, _, text = next_objective(perception)
+    if not text:
+        return None
+    return ("NEXT OBJECTIVE (this is the most useful thing you can do right now — do it "
+            "before anything else, and ignore longer-term goals until it is done): " + text)
 
 
 def build_messages(payload: dict, system_prefix: str = "") -> list[dict]:
@@ -242,7 +267,7 @@ def build_messages(payload: dict, system_prefix: str = "") -> list[dict]:
             'Choose the skills that carry it out. If the directive tells you to stop doing '
             'something, do not do it, even if a rule above says it is your main priority.'
         )
-    elif objective := _next_objective(perception):
+    elif objective := objective_text(perception):
         parts.append(objective)
     else:
         parts.append("What is your next move? Respond with a JSON array of skill/action objects.")

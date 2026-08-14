@@ -146,7 +146,11 @@ local function skill_build_miner(character, p)
     return false
   end
 
-  local patch, pd = nil, math.huge
+  -- Candidate tiles in distance order. Trying only the single nearest tile is what
+  -- wedged this skill in play: leftover collector chests from an earlier mine sat next
+  -- to the closest ore, so placement failed there every single turn while thousands of
+  -- free tiles waited a few metres away.
+  local candidates = {}
   local skipped = 0
   for _, e in ipairs(surface.find_entities_filtered{name = resource, type = "resource",
                                                     position = character.position, radius = 64}) do
@@ -154,11 +158,12 @@ local function skill_build_miner(character, p)
       skipped = skipped + 1
     else
       local dx, dy = e.position.x - character.position.x, e.position.y - character.position.y
-      local d = dx * dx + dy * dy
-      if d < pd then pd = d; patch = e end
+      candidates[#candidates + 1] = {pos = e.position, d = dx * dx + dy * dy}
     end
   end
-  if not patch then
+  table.sort(candidates, function(a, b) return a.d < b.d end)
+
+  if #candidates == 0 then
     if skipped > 0 then
       return false, string.format(
         "build_miner: every '%s' tile within 64 tiles is already under a drill (%d checked) " ..
@@ -173,18 +178,30 @@ local function skill_build_miner(character, p)
   -- placed. place/insert here all use explicit positions (find_entity searches
   -- around action.position, not the character), so no character reach is needed.
 
-  -- place the drill on the patch (place primitive enforces drill-on-resource)
-  local drill
-  for _, dir in ipairs({"south", "north", "east", "west"}) do
-    if AIActions.run(character, {action = "place", item = "burner-mining-drill",
-                                 position = patch.position, direction = dir}) then
-      drill = surface.find_entities_filtered{name = "burner-mining-drill",
-                                             position = patch.position, radius = 2}[1]
-      if drill then break end
+  -- Place the drill (the place primitive enforces drill-on-resource). Walk the candidate
+  -- tiles until one takes it, and keep the primitive's own reason for the last failure:
+  -- "(blocked?)" told the model nothing it could act on, so it simply retried forever.
+  local drill, last_error
+  for i = 1, math.min(#candidates, 24) do
+    local pos = candidates[i].pos
+    for _, dir in ipairs({"south", "north", "east", "west"}) do
+      local ok, detail = AIActions.run(character, {action = "place", item = "burner-mining-drill",
+                                                   position = pos, direction = dir})
+      if ok then
+        drill = surface.find_entities_filtered{name = "burner-mining-drill",
+                                               position = pos, radius = 2}[1]
+        if drill then break end
+      else
+        last_error = detail or last_error
+      end
     end
+    if drill then break end
   end
   if not drill then
-    return false, "build_miner: couldn't place a drill on the " .. resource .. " patch (blocked?)"
+    return false, string.format(
+      "build_miner: no room for a drill on the nearest %d '%s' tiles — last reason: %s. " ..
+      "Try clear_area, or explore for a different patch.",
+      math.min(#candidates, 24), resource, last_error or "unknown")
   end
 
   -- fuel the drill

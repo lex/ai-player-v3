@@ -14,11 +14,53 @@ from .config import BridgeConfig
 from .factorio.api import parse_response
 from .factorio.watcher import PendingRequest
 from .metrics import STATUS_OK, STATUS_PARSE_ERROR, STATUS_TIMEOUT, record_exchange
-from .prompt import build_messages
+from .prompt import build_messages, next_objective
 from .providers import get_provider
 from .transcript import log_exchange
 
 log = logging.getLogger(__name__)
+
+
+def _count(value) -> int:
+    """ghosts/deconstruction arrive as a plain int or as {count, list} depending on the
+    perception path that produced them."""
+    if isinstance(value, dict):
+        return int(value.get("count", 0) or 0)
+    return int(value or 0)
+
+
+def _model_needed(payload: dict) -> str | None:
+    """
+    Why this turn needs a model, or None when the deterministic ladder is enough.
+
+    The model is for judgement under ambiguity. It is not for arithmetic: when the
+    bootstrap ladder already yields exactly one sensible move, asking a model to agree
+    costs 15-20s and a few thousand tokens per turn and can only introduce disagreement.
+    A turn is handed to the model when something genuinely open is happening — the human
+    is directing, or has placed ghosts / marked deconstruction, or the ladder has run out
+    and the base needs actual planning.
+    """
+    perception = payload.get("perception") or {}
+    memory = perception.get("memory") or payload.get("memory") or {}
+
+    if payload.get("user_message"):
+        return "player sent a message"
+    if memory.get("user_directive"):
+        return "a player directive is active"
+    if memory.get("force_skill"):
+        return "a skill is force-gated"
+    if _count(perception.get("ghosts")) > 0:
+        return "the human placed ghosts"
+    if _count(perception.get("deconstruction")) > 0:
+        return "the human marked deconstruction"
+
+    # A failure last turn means the obvious move already did not work; let the model
+    # read the failure detail and choose differently rather than repeating the ladder.
+    for r in (memory.get("last_action_results") or []):
+        if not r.get("ok"):
+            return "the last turn had a failure to react to"
+
+    return None
 
 
 def _fallback(reason: str) -> list[dict]:
@@ -38,6 +80,17 @@ class Agent:
         if "perception" not in payload:
             log.error("Request %s: no 'perception' in payload — fallback", req.req_id)
             return _fallback("internal error: request had no perception")
+
+        # Deterministic fast path: during the bootstrap the next move is a fact about
+        # Factorio, not a judgement call, so answer it directly instead of paying a
+        # model round trip to be told what we already computed.
+        why_model = _model_needed(payload)
+        if why_model is None:
+            entry, chat_line, _ = next_objective(payload["perception"])
+            if entry:
+                log.info("Request %s: answered from the objective ladder, no model call (%s)",
+                         req.req_id, entry.get("skill"))
+                return [{"action": "chat", "message": chat_line}, entry]
 
         messages = build_messages(payload, config.system_prefix)
 
