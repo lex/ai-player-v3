@@ -15,6 +15,18 @@ local function inv_of(character)
   return character.get_inventory(defines.inventory.character_main)
 end
 
+-- Where new buildings should go: the home anchor if there is one, else here.
+--
+-- Building "wherever the character is standing" is wrong on this map. The agent wanders —
+-- explore teleports it a hundred tiles away — and on an ore-covered map that meant it
+-- started mining ore out at the map edge to make room for a furnace, when spawn is already
+-- cleared and is where the rest of the base is.
+local function base_anchor(character)
+  local home = storage.ai_player and storage.ai_player.home_position
+  if home then return {x = home.x, y = home.y} end
+  return character.position
+end
+
 -- Find a spot for `proto` that is both physically free AND clear of ore.
 --
 -- find_non_colliding_position alone is not enough on a Danger Ores map: ore entities have
@@ -109,14 +121,14 @@ local function skill_build_smelter(character, p)
   end
 
   local count = math.min(want, have_furnace)
-  local base = character.position
+  local base = base_anchor(character)
   local placed = 0
   for i = 1, count do
     local anchor = {x = base.x + i * 2, y = base.y - 1}
-    local pos, clear = find_clear_position(surface, "stone-furnace", anchor, 12)
+    local pos, clear = find_clear_position(surface, "stone-furnace", anchor, 24)
     if pos and not clear then
       -- Every nearby spot is on ore; a furnace there would be destroyed by the map rule.
-      return false, "build_smelter: no ore-free ground within 12 tiles — furnaces cannot be " ..
+      return false, "build_smelter: no ore-free ground within 24 tiles of home — furnaces cannot be " ..
                     "built on ore on this map. Run {\"skill\":\"clear_area\",\"radius\":8} to mine " ..
                     "the ore away, then retry."
     end
@@ -977,10 +989,11 @@ local function skill_build_lab(character, p)
   local surface = character.surface
   local placed = 0
   for i = 1, math.min(want, have) do
+    local anchor = base_anchor(character)
     local spot, clear = find_clear_position(surface, "lab",
-      {x = character.position.x + i * 4, y = character.position.y + 4}, 12)
+      {x = anchor.x + i * 4, y = anchor.y + 4}, 24)
     if spot and not clear then
-      return false, "build_lab: no ore-free ground within 12 tiles — a lab on ore would be " ..
+      return false, "build_lab: no ore-free ground within 24 tiles of home — a lab on ore would be " ..
                     "destroyed by this map's rules. Run {\"skill\":\"clear_area\",\"radius\":8} " ..
                     "first, then retry."
     end

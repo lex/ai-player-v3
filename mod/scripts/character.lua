@@ -94,7 +94,15 @@ function AICharacter.spawn_ai_player()
   -- Anchor the home/base location on first spawn so the AI can navigate back and
   -- avoid wandering. Persists across respawns (only set when missing).
   if not storage.ai_player.home_position then
-    storage.ai_player.home_position = {x = math.floor(pos.x), y = math.floor(pos.y)}
+    -- Anchor on the force's SPAWN, not on wherever this character happens to appear.
+    -- Spawn is where the base is and, on an ore-covered map, the one place already
+    -- cleared for building. Anchoring on the character meant that after a wander the
+    -- "home" became the map edge, and the agent started clearing ore out there to make
+    -- room it already had at spawn.
+    local spawn = character.force.get_spawn_position(character.surface)
+    storage.ai_player.home_position = spawn
+      and {x = math.floor(spawn.x), y = math.floor(spawn.y)}
+      or  {x = math.floor(pos.x), y = math.floor(pos.y)}
   end
 
   game.print(string.format("[AI] Spawned at {%.1f, %.1f}", pos.x, pos.y), {r=0, g=1, b=0})

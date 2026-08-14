@@ -93,6 +93,10 @@ ground piles ore on the floor and the mine is useless.
 8. AUTOMATE. Replace burner drills with electric ones, and build assemblers, only after
    power exists.
 Do not jump ahead. Power before mining, or labs before smelting, wastes the whole turn.
+BUILD AT HOME. perception.home.distance is how far you have drifted. Spawn is already cleared
+of ore and holds the rest of the factory, so build there — never clear fresh ground out in a
+field just because that is where you happen to be standing. Mines go on the ore; everything
+else goes home.
 
 === THIS MAP: DANGER ORES ===
 The ground itself is ore, and that changes the rules:
@@ -209,6 +213,19 @@ def next_objective(perception: dict) -> tuple[dict | None, str | None, str | Non
     furnaces = placed("stone-furnace", "steel-furnace", "electric-furnace")
     labs = placed("lab")
 
+    # 0a. Wandered off. explore teleports a long way, and building where you happen to be
+    #     standing means clearing fresh ore in a field when spawn is already clear and is
+    #     where the rest of the base is. Go back before building anything.
+    home = perception.get("home") or {}
+    if int(home.get("distance", 0) or 0) > 80:
+        return (
+            {"skill": "return_home"},
+            "Heading back to base — no point building out here.",
+            'you are far from your base. Go back with {"skill":"return_home"} before building '
+            'anything: spawn is already clear of ore and is where the rest of your factory is, '
+            'so building out here means clearing ground you already have.',
+        )
+
     # 0. A full inventory breaks everything downstream — mining stops yielding, crafting has
     #    nowhere to put output, placement fails for want of a slot — and it does so silently,
     #    so it looks like the other skills are broken. Clear it before anything else.
@@ -278,6 +295,17 @@ def next_objective(perception: dict) -> tuple[dict | None, str | None, str | Non
         if trigger_do.startswith("craft:"):
             item = trigger_do.split(":", 1)[1]
             ore = {"copper-plate": "copper-ore", "iron-plate": "iron-ore"}.get(item)
+            if not ore:
+                # Any other trigger item is just something to build: ask for it directly and
+                # let craft report the exact shortfall if the ingredients are not there.
+                return (
+                    {"skill": "craft", "recipe": item, "count": 1},
+                    f"Crafting a {item} — that unlocks the next technology.",
+                    f'craft it: {{"skill":"craft","recipe":"{item}","count":1}}. Nothing is '
+                    f'queueable — the next technology ({research.get("trigger")}) unlocks by '
+                    f'CRAFTING {item}. If you lack the ingredients, craft will say exactly '
+                    'which, and you make those first.',
+                )
             if ore:
                 if have(ore) == 0:
                     return (

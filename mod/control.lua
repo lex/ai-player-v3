@@ -215,7 +215,13 @@ script.on_configuration_changed(function()
   -- updating to a mod version that added home tracking mid-session).
   local c = storage.ai_player.character
   if c and c.valid and not storage.ai_player.home_position then
-    storage.ai_player.home_position = {x = math.floor(c.position.x), y = math.floor(c.position.y)}
+    -- Spawn, not the current position: this backfill runs on mod update, by which time
+    -- the character may be anywhere, and anchoring "home" to a random field is worse
+    -- than having no anchor at all.
+    local spawn = c.force.get_spawn_position(c.surface)
+    storage.ai_player.home_position = spawn
+      and {x = math.floor(spawn.x), y = math.floor(spawn.y)}
+      or  {x = math.floor(c.position.x), y = math.floor(c.position.y)}
   end
   AIBrain.write_bridge_config()
   -- Rebuild the machine registry from the live world (covers mod-update load and
